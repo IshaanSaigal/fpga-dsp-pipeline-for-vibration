@@ -184,6 +184,11 @@ void app_main(void)
             ESP_LOGE(TAG, "SPI slave receive failed: %s", esp_err_to_name(ret));
         }
 
+        // To reset the TWDT of IDLE 0 task running on the same core, we need to
+        // we need to introduce an explicit delay during which FreeRTOS will schedule
+        // the IDLE 0 task, which will reset its own TWDT:
+        vTaskDelay(pdMS_TO_TICKS(10)); // Delay for 10 ms
+
     }
     // To release the SPI peripheral and associated resources (like DMA channel, GPIO pins):
     // spi_slave_free(SLAVE_SPI_HOST);
