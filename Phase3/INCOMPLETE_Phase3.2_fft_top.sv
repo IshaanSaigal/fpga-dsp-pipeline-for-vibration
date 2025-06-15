@@ -562,6 +562,10 @@ module fft_top (
                     end
                 end*/
                 
+                S_FFT_WAIT_TLAST: begin
+                    flit_transfer_counter_reg <= 10'b0; //reset this counter
+                end
+                
                 
                 // 11. Sending FIFO buffer's data over UART (higher byte):
                 
