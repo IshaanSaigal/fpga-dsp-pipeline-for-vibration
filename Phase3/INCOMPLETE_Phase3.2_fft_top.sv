@@ -26,7 +26,7 @@ module fft_top (
     
     inout wire MPU_SCL,         // PMOD JA, Pin J1
     inout wire MPU_SDA,         // PMOD JA, Pin L2
-    // NOTE: Since both SDA and SCL (clock stretching) can be controlled by both i2c_master and slave (MPU6050),
+    // NOTE: Since both SDA and SCL (clock stretching) can be controlled by both i2c_master and slave (MPU-6050),
     // these must be modelled as inout ports.
     
     output wire UART_TXD        // UART Transmit Data line, Pin A18
@@ -101,7 +101,7 @@ module fft_top (
     logic           fifo_in_write_en_reg;
     logic [15:0]    fifo_in_write_data_reg;
     
-    logic           fifo_in_read_en_reg;
+    logic           fifo_in_read_en;        // wire not reg; for fast AXIS handshaking
     logic [15:0]    fifo_in_read_data;
     
     logic           fifo_in_full;
@@ -110,13 +110,18 @@ module fft_top (
     // Counter for counting inputting exactly 1024 words in the FIFO buffer (1026 is the actual depth):
     logic [10:0]    fifo_in_write_counter_reg; // 11 bits, since I want to include 1024 as a comparison
     
+    //NOTE: This buffer's input logic is sequential for slow I2C, but output logic is combinational for fast AXI4-Stream.
+    // Combinational logic is needed in AXI4-Stream for reading in a single clock cycle.
+    
     
     // --- Internal Signals for the FFT IP ---
-    logic [31:0]    m_axis_data_tdata_reg;
-    logic           m_axis_data_tvalid_reg;
+    // Signals for AXI4-Stream Master logic (for inputting data to the FFT core):
+    logic [31:0]    m_axis_data_tdata;
+    logic           m_axis_data_tvalid;
     logic           m_axis_data_tready;
-    logic           m_axis_data_tlast_reg;
+    logic           m_axis_data_tlast;
     
+    // Signals for AXI4-Stream Slave logic (for outputting data from the FFT core):
     logic [31:0]    s_axis_data_tdata;
     logic           s_axis_data_tvalid;
     logic           s_axis_data_tready;
@@ -135,12 +140,11 @@ module fft_top (
     logic           fifo_out_full;
     logic           fifo_out_empty;
     
-    //NOTE: This buffer's input logic is combinational, but output is sequential. Might need to change the output??.
-    // Combinational logic is needed for writing AXI4-Stream in a single clock cycle.
+    // NOTE: Unlike the Input Buffer FIFO core, we won't need a counter for inputting exactly 1024 samples here,
+    // since we can use the s_axis_data_tlast output signal from the FFT core for indicating last sample.
     
-    // Counter for counting inputting exactly 1024 words in the FIFO buffer (1026 is the actual depth):
-    //logic [10:0]    fifo_out_write_counter_reg; // 11 bits, since I want to include 1024 as a comparison
-    // not needed because tlast signal
+    //NOTE: This buffer's input logic is combinational for fast AXI4-Stream, but output logic is sequential for slow SPI.
+    // Combinational logic is needed in AXI4-Stream for writing in a single clock cycle.
     
     
     // --- Instantiating I2C Master module ---
@@ -186,10 +190,10 @@ module fft_top (
     
     // --- Instantiating UART TX Module ---
     uart_tx #(
-        .BIT_RATE(115200),          // Baud rate
-        .CLK_HZ(100_000_000),       // System clock frequency
-        .PAYLOAD_BITS(8),           // Number of data bits
-        .STOP_BITS(1)               // Number of stop bits
+        .BIT_RATE(115200),                  // Baud rate
+        .CLK_HZ(100_000_000),               // System clock frequency
+        .PAYLOAD_BITS(8),                   // Number of data bits
+        .STOP_BITS(1)                       // Number of stop bits
     ) uart_transmitter_inst (
         .clk(CLK100MHZ),                    // System clock
         .resetn(rst_n),                     // Active-low reset
@@ -200,7 +204,7 @@ module fft_top (
     );
     
     
-    // --- Instantiating Input FIFO Buffer IP ---
+    // --- Instantiating the FIFO IP for Input Buffer ---
     fifo_buffer in_fifo_buffer_inst (
         .clk(CLK100MHZ),                // input wire clk
         .srst(fifo_sync_reset),      // input wire srst
@@ -208,7 +212,7 @@ module fft_top (
         .din(fifo_in_write_data_reg),   // input wire [15 : 0] din
         .wr_en(fifo_in_write_en_reg),   // input wire wr_en
         
-        .rd_en(fifo_in_read_en_reg),    // input wire rd_en
+        .rd_en(fifo_in_read_en),    // input wire rd_en
         .dout(fifo_in_read_data),       // output wire [15 : 0] dout
         
         .full(fifo_in_full),            // output wire full
@@ -222,15 +226,15 @@ module fft_top (
         .aclken(1'b1),                                            // input wire aclken
         .aresetn(rst_n),                                          // input wire aresetn
         
-        // unconnected:
+        // unconnected (still need to write connections to avoid Critical Warnings):
         .s_axis_config_tdata(16'b0),                  // input wire [15 : 0] s_axis_config_tdata
         .s_axis_config_tvalid(1'b0),                // input wire s_axis_config_tvalid
         .s_axis_config_tready(s_axis_config_tready),                // output wire s_axis_config_tready
         
-        .s_axis_data_tdata(m_axis_data_tdata_reg),                      // input wire [31 : 0] s_axis_data_tdata
-        .s_axis_data_tvalid(m_axis_data_tvalid_reg),                    // input wire s_axis_data_tvalid
+        .s_axis_data_tdata(m_axis_data_tdata),                      // input wire [31 : 0] s_axis_data_tdata
+        .s_axis_data_tvalid(m_axis_data_tvalid),                    // input wire s_axis_data_tvalid
         .s_axis_data_tready(m_axis_data_tready),                    // output wire s_axis_data_tready
-        .s_axis_data_tlast(m_axis_data_tlast_reg),                      // input wire s_axis_data_tlast
+        .s_axis_data_tlast(m_axis_data_tlast),                      // input wire s_axis_data_tlast
         
         .m_axis_data_tdata(s_axis_data_tdata),                      // output wire [31 : 0] m_axis_data_tdata
         .m_axis_data_tvalid(s_axis_data_tvalid),                    // output wire m_axis_data_tvalid
@@ -247,7 +251,7 @@ module fft_top (
     );
     
     
-    // --- Instantiating Output FIFO Buffer IP ---
+    // --- Instantiating the FIFO IP for Output Buffer ---
     fifo_generator_0 out_fifo_buffer_inst (
         .clk(CLK100MHZ),      // input wire clk
         .srst(fifo_sync_reset),    // input wire srst // using same signal as the input fifo buffer
@@ -290,7 +294,7 @@ module fft_top (
         S_I2C_ACCEL_XOUT_READ_OUTPUT,               // Read the ACCEL_XOUT_H register (ACCEL_XOUT_L is still on the output wire of the burst instance)
                                                     // NEW: Read the ACCEL_XOUT_H and ACCEL_XOUT_L registers.
         
-        // 4. Inputting accelerometer readings to FIFO buffer:
+        // 4. Writing accelerometer readings to input FIFO buffer
         S_FIFO_IN_WRITE_ENABLE,
         
         // 5. Sending ACCEL_XOUT_H over UART
@@ -314,27 +318,23 @@ module fft_top (
         S_UART_WHO_AM_I_PULSE_ENABLE,           // Pulse the uart_tx enable wire for 1 system clock cycle
         S_UART_WHO_AM_I_WAIT_BUSY_LOW,          // Wait till the uart_tx busy wire is LOW
         
-        // 9. Inputting the FIFO buffer's values to the FFT IP once we have collected 1024 samples:
-        S_FFT_IN_CONFIG,
-        S_FFT_IN_ASSERT_TVALID,
+        // 9. Streaming the 1024-sample input frame from the input FIFO buffer to the FFT core
+        S_FFT_INPUT_FRAME,                      // High-speed combinational logic for AXIS flit transfer on every clock cycle
         
-        // 10. Inputting FFT IP's output to FIFO buffer:
-        //S_FFT_WAIT_TVALID, // wait till the output tvalid is high
-        //S_FIFO_OUT_WRITE_CONFIG, // put the write data on the fifo din bus
-        //S_FIFO_OUT_WRITE_ENABLE,
-        S_FFT_WAIT_TLAST,
+        // 10. Streaming the 1024-sample output frame from the FFT core to the output FIFO buffer
+        S_FFT_OUTPUT_FRAME,                     // High-speed combinational logic for AXIS flit transfer on every clock cycle
         
-        // 11. Sending FIFO buffer's data over UART (real higher byte):
-        S_UART_FIFO_OUT_H_LATCH,             // Latch the ACCEL_XOUT_H value to the uart_tx input data_to_transmit_reg
-        S_UART_FIFO_OUT_H_PULSE_ENABLE,       // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_OUT_H_WAIT_BUSY_LOW,      // Wait till the uart_tx busy wire is LOW
+        // 11. Sending higher real byte in output FIFO buffer over UART
+        S_UART_FIFO_OUT_H_LATCH,                // Latch the higher real byte to the uart_tx input data_to_transmit_reg
+        S_UART_FIFO_OUT_H_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_FIFO_OUT_H_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
         
-        // 12. Sending FIFO buffer's data over UART (real lower byte):
-        S_UART_FIFO_OUT_L_LATCH,              // Latch the ACCEL_XOUT_L value to the uart_tx input data_to_transmit_reg (previously stored ACCEL_XOUT_H)
-        S_UART_FIFO_OUT_L_PULSE_ENABLE,       // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_OUT_L_WAIT_BUSY_LOW,      // Wait till the uart_tx busy wire is LOW
+        // 12. Sending lower real byte in output FIFO buffer over UART
+        S_UART_FIFO_OUT_L_LATCH,                // Latch the lower real byte to the uart_tx input data_to_transmit_reg
+        S_UART_FIFO_OUT_L_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_FIFO_OUT_L_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
         
-        S_DONE
+        S_DONE                                  // Reset all the counters used in the FSM
     } main_state_t;
     
     main_state_t current_state, next_state;
@@ -370,17 +370,10 @@ module fft_top (
             
             fifo_in_write_en_reg <= 1'b0;
             fifo_in_write_data_reg <= 16'b0;
-            fifo_in_read_en_reg <= 1'b0;
             fifo_in_write_counter_reg <= 11'b0;
             
-            m_axis_data_tdata_reg <= 32'b0;
-            m_axis_data_tvalid_reg <= 1'b0;
-            m_axis_data_tlast_reg <= 1'b0;
-            //s_axis_data_tready_reg <= 1'b0;
             flit_transfer_counter_reg <= 11'b0;
             
-            //fifo_out_write_en_reg <= 1'b0;
-            //fifo_out_write_data_reg <= 32'b0;
             fifo_out_read_en_reg <= 1'b0;
             
         end else begin
@@ -390,15 +383,8 @@ module fft_top (
             // The rest of the I2C registers are held undefined/latched right now
             
             fifo_in_write_en_reg <= 1'b0;
-            fifo_in_read_en_reg <= 1'b0;
             // The rest of the input FIFO IP registers are held undefined/latched right now.
             
-            m_axis_data_tvalid_reg <= 1'b0;
-            m_axis_data_tlast_reg <= 1'b0;
-            //s_axis_data_tready_reg <= 1'b0;
-            // The rest of the FFT IP registers are held undefined/latched right now.
-            
-            //fifo_out_write_en_reg <= 1'b0;
             fifo_out_read_en_reg <= 1'b0;
             // The rest of the output FIFO IP registers are held undefined/latched right now.
             
@@ -474,7 +460,7 @@ module fft_top (
                 end
                 
                 
-                // 4. Inputting accelerometer readings to FIFO buffer:
+                // 4. Writing accelerometer readings to input FIFO buffer
                 
                 S_FIFO_IN_WRITE_ENABLE: begin
                     if (!fifo_in_full) begin
@@ -482,7 +468,7 @@ module fft_top (
                         fifo_in_write_en_reg <= 1'b1;
                     end
                     
-                    // Increment the counter:
+                    // Increment the counter indicating a write to the FIFO buffer:
                     fifo_in_write_counter_reg <= fifo_in_write_counter_reg + 1;
                 end
                 
@@ -520,54 +506,17 @@ module fft_top (
                 end
                 
                 
-                // 9.
+                // 9. Streaming the 1024-sample input frame from the input FIFO buffer to the FFT core
                 
-                S_FFT_IN_CONFIG: begin
-                    fifo_in_write_counter_reg <= 11'b0; //reset this counter
-                    
-                    if (!fifo_in_empty)
-                        m_axis_data_tdata_reg <= {16'b0, fifo_in_read_data}; // concatenation
-                    
-                    // need to assert tlast depending on a counter here
-                    if (flit_transfer_counter_reg == 1023) // // 1023 means 1023 flits have been transferred; 1024th (last) is left
-                        m_axis_data_tlast_reg <= 1'b1;
-                end
-                
-                S_FFT_IN_ASSERT_TVALID: begin
-                    m_axis_data_tvalid_reg <= 1'b1;
-                    
-                    if (m_axis_data_tready && !fifo_in_empty) begin // means current word will be inputted to the FFT IP; we should go to the next word
-                        // Assert read enable to request the next word
-                        fifo_in_read_en_reg <= 1'b1; // read; output is available on the same clock cycle
-                        
-                        // increment counter indicating a flit transfer:
+                S_FFT_INPUT_FRAME: begin
+                    // increment counter indicating a flit transfer:
+                    if (m_axis_data_tvalid && m_axis_data_tready && !fifo_in_empty)
+                        // means AXIS handshaking; current word will be inputted to the FFT IP; we should go to the next word
                         flit_transfer_counter_reg <= flit_transfer_counter_reg + 1;
-                    end
                 end
                 
                 
-                // 10.
-                
-                /*S_FIFO_OUT_WRITE_CONFIG: begin
-                    if (s_axis_data_tvalid)
-                        fifo_out_write_data_reg <= s_axis_data_tdata;
-                end
-                
-                S_FFT_WAIT_TLAST: begin
-                    if (s_axis_data_tvalid && !fifo_out_full) begin
-                        fifo_out_write_en_reg <= 1'b1;
-                        
-                        // tready:
-                        s_axis_data_tready_reg <= 1'b1;     // tvalid is high; we are making tready high => flit transfer occurs on NEXT cycle
-                    end
-                end*/
-                
-                S_FFT_WAIT_TLAST: begin
-                    flit_transfer_counter_reg <= 10'b0; //reset this counter
-                end
-                
-                
-                // 11. Sending FIFO buffer's data over UART (higher byte):
+                // 11. Sending higher real byte in output FIFO buffer over UART
                 
                 S_UART_FIFO_OUT_H_LATCH: begin
                     if (!fifo_out_empty) begin
@@ -577,7 +526,8 @@ module fft_top (
                 end
                 
                 
-                // 12. Sending FIFO buffer's data over UART (lower byte):
+                // 12. Sending lower real byte in output FIFO buffer over UART
+                
                 S_UART_FIFO_OUT_L_LATCH: begin
                     if (!fifo_out_empty) begin
                         // Latch the lower byte to uart_tx's data_to_transmit_reg for transmission
@@ -588,18 +538,30 @@ module fft_top (
                     end
                 end
                 
+                
+                S_DONE: begin
+                    // Resetting all the counters used in the FSM:
+                    fifo_in_write_counter_reg <= 11'b0;
+                    flit_transfer_counter_reg <= 11'b0;
+                end
+                
             endcase
         end
     end
     
     
     // --- FSM Combinational Logic ---
-    // NOTE: The UART logic is fully combinational
+    // NOTE: The AXI4-Stream and UART logic is purely combinational
     always_comb begin
         // Defaults:
         uart_tx_en_pulse_sig = 1'b0;    // When in any other state except S_UART_PULSE_ENABLE, uart_tx_en_pulse_sig is LOW by default
         
         next_state = current_state;     // By default, stay in current_state, unless explicitly mentioned in a case
+        
+        m_axis_data_tdata = 32'b0;
+        m_axis_data_tvalid = 1'b0;
+        m_axis_data_tlast = 1'b0;
+        fifo_in_read_en = 1'b0;
         
         s_axis_data_tready = 1'b0;
         fifo_out_write_en = 1'b0;
@@ -722,7 +684,7 @@ module fft_top (
             end
             
             
-            // 4. Inputting accelerometer readings to FIFO buffer:
+            // 4. Writing accelerometer readings to input FIFO buffer
             
             S_FIFO_IN_WRITE_ENABLE: begin
                 next_state = S_UART_ACCEL_XOUT_H_PULSE_ENABLE;
@@ -831,70 +793,61 @@ module fft_top (
             S_UART_WHO_AM_I_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig) begin
-                    if (fifo_in_write_counter_reg == 1024 || fifo_in_full) // go to fifo reading if counter indicates 1024 words have been written
-                        next_state = S_FFT_IN_CONFIG;
+                    if (fifo_in_write_counter_reg >= 1024 || fifo_in_full) // go to fifo reading if counter indicates 1024 words have been written
+                        next_state = S_FFT_INPUT_FRAME;
                     else
-                        next_state = S_DONE;
+                        next_state = S_I2C_ACCEL_XOUT_CONFIG;           // Loop back to burst reading accelerometer values
                 end else
                     next_state = S_UART_WHO_AM_I_WAIT_BUSY_LOW;
             end
             
             
-            // 9.
+            // 9. Streaming the 1024-sample input frame from the input FIFO buffer to the FFT core
             
-            S_FFT_IN_CONFIG: begin
-                if (flit_transfer_counter_reg == 1024) //counter logic  // 1024 means 1024 (ALL) flits have been transferred
-                    next_state = S_FFT_WAIT_TLAST;
+            S_FFT_INPUT_FRAME: begin
+                if (!fifo_in_empty) begin
+                    m_axis_data_tdata = {16'b0, fifo_in_read_data}; // concatenation
+                    m_axis_data_tvalid = 1'b1;
+                end
+                
+                if (m_axis_data_tvalid && m_axis_data_tready && !fifo_in_empty)
+                    // means AXIS handshaking; current word will be inputted to the FFT IP; we should go to the next word
+                    fifo_in_read_en = 1'b1; // Assert read enable to request the next word
                 else
-                    next_state = S_FFT_IN_ASSERT_TVALID;
-            end
-            
-            S_FFT_IN_ASSERT_TVALID: begin  // both ready and valid need to be high for 1 clk cycle
-                if (m_axis_data_tready) begin
-                    next_state = S_FFT_IN_CONFIG; // input next flit
-                end else
-                    next_state = S_FFT_IN_ASSERT_TVALID; // stay in this state
-            end
-            
-            
-            // 10.
-            
-            /*S_FFT_WAIT_TVALID: begin
-                if (s_axis_data_tvalid)
-                    next_state = S_FIFO_OUT_WRITE_CONFIG;
+                    fifo_in_read_en = 1'b0;
+                
+                // need to assert tlast depending on a counter here
+                if (flit_transfer_counter_reg == 1023) // // 1023 means 1023 flits have been transferred; 1024th (last) is left
+                    m_axis_data_tlast = 1'b1;
+                
+                if (flit_transfer_counter_reg >= 1024) //counter logic  // 1024 means 1024 (ALL) flits have been transferred
+                    next_state = S_FFT_OUTPUT_FRAME;
                 else
-                    next_state = S_FFT_WAIT_TVALID;
+                    next_state = S_FFT_INPUT_FRAME;
             end
             
-            S_FIFO_OUT_WRITE_CONFIG: begin
-                next_state = S_FIFO_OUT_WRITE_ENABLE;
-            end
             
-            S_FIFO_OUT_WRITE_ENABLE: begin
-                if (s_axis_data_tlast && s_axis_data_tvalid)
-                    next_state = S_UART_FIFO_OUT_H_LATCH;
-                else
-                    next_state =  S_FIFO_OUT_WRITE_CONFIG;
-            end*/
+            // 10. Streaming the 1024-sample output frame from the FFT core to the output FIFO buffer
             
-            S_FFT_WAIT_TLAST: begin
+            S_FFT_OUTPUT_FRAME: begin
                 // We can accept data if our buffer is not full
                 s_axis_data_tready = !fifo_out_full;
                 
                 // We perform a write if the FFT has data AND we are ready
-                if (s_axis_data_tvalid && s_axis_data_tready) begin
+                if (s_axis_data_tvalid && s_axis_data_tready && !fifo_out_full)
                     fifo_out_write_en = 1'b1;
-                end
+                else
+                    fifo_out_write_en = 1'b0;
                 
                 // We transition away only when the LAST transfer is complete
                 if (s_axis_data_tlast && s_axis_data_tvalid && s_axis_data_tready)
                     next_state = S_UART_FIFO_OUT_H_LATCH;
                 else
-                    next_state = S_FFT_WAIT_TLAST;
+                    next_state = S_FFT_OUTPUT_FRAME;
             end
             
             
-            // 11. higher byte
+            // 11. Sending higher real byte in output FIFO buffer over UART
             
             S_UART_FIFO_OUT_H_LATCH: begin
                 // Just wait 1 clock cycle to latch the higher byte to uart_tx's data_to_transmit_reg
@@ -920,7 +873,7 @@ module fft_top (
             end
             
             
-            // 12. lower byte
+            // 12. Sending lower real byte in output FIFO buffer over UART
             
             S_UART_FIFO_OUT_L_LATCH: begin
                 // Just wait 1 clock cycle to latch the lower byte to uart_tx's data_to_transmit_reg
