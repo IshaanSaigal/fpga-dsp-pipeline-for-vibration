@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
 // Company: 
-// Engineer: Ishaan Saigal
+// Engineer: 
 // 
 // Create Date: 10.06.2025 17:47:01
 // Design Name: 
@@ -33,10 +33,10 @@ module fft_top (
 );
     
     // --- Internal Signals ---
-    logic rst_n;                        // Internal active-low reset signal
-    assign rst_n = RESET_N;
-    // The above code seems redundant for the current modules, which both have active-low resets.
-    // However, in case any other module in the future requires a reset signal, which may be active-high, we need to have the
+    logic   rst_n;                          // Internal active-low reset signal
+    assign  rst_n = RESET_N;
+    // The above code seems redundant for modules that have active-low resets.
+    // However, in case of modules (like the FIFO IP cores) requiring an active-high reset signal, we need to have the
     // wire rst_n which we can alter as per our requirements (active-high vs active-low), while still using the same external switch.
     
     
@@ -84,12 +84,12 @@ module fft_top (
     // --- Internal Signals for Input FIFO Buffer ---
     logic           fifo_sync_reset;                    // (wire) Unnecessary; just used for better readability
     logic           reset_sync_reg1, reset_sync_reg2;   // 1-bit registers are equivalent to FFs
-    // The "srst" port of the FIFO Generator IP is a synchronous reset. "Synchronous" means that the reset only happens on the rising edge of the clk.
-    // We cannot directly connect to RESET_N switch since that is asynchronous, and could cause metastability in the FIFO core.
+    // The "srst" port of the FIFO Generator IP is an active-high synchronous reset. "Synchronous" means that the reset only happens on the
+    // rising edge of the clk. We cannot directly connect to RESET_N switch since that is asynchronous, and could cause metastability in the FIFO core.
     // Thus, we update this in a separate always_ff block, synchronised with the clk. For this, we will use a two-flop synchronizer chain:
     always_ff @(posedge CLK100MHZ) begin
         // First FF samples the asynchronous switch input. This FF is allowed to go metastable.
-        reset_sync_reg1 <= !rst_n;              // This FF samples the asynchronous rst_n signal on the clk edge.
+        reset_sync_reg1 <= !rst_n;              // This FF samples asynchronous rst_n on the clk edge; !rst_n since active-high
         // Setup time is the minimum time BEFORE the clk edge that the input must be stable.
         // Hold time is the minimum time AFTER the clk edge that the input must be stable.
         // If the rst_n signal changes in this setup/hold window, the reset_sync_reg1 would become metastable.
@@ -112,9 +112,9 @@ module fft_top (
         // posedge 2: FF2 samples the stable output of FF1, without any metastability. However, if FF1 resolved to
         //            the incorrect value, FF2 would sample that incorrect value.
         //            FF1 samples !rst_n again. Since RESET_N doesn't change, FF1 latches the correct value.
-        // posedge 3: FF2 samples the stable output of FF1, which is now the correct value.
+        // posedge 3: FF2 samples the stable output of FF1, which is now the correctly value.
     end
-    assign fifo_sync_reset = reset_sync_reg2;
+    assign fifo_sync_reset = reset_sync_reg2;   // Wire holds synchronous value for !rst_n (because active-high)
     
     logic           fifo_in_write_en_reg;       // 1-cycle enable pulse for writing into the buffer; register for sequential I2C logic
     logic [15:0]    fifo_in_write_data_reg;     // Register bus for sequential I2C logic. Only 16-bit real input values are stored to save resources; imag=0
@@ -407,6 +407,7 @@ module fft_top (
             // NOTE: The rest of the I2C registers are held undefined/latched right now
             
             fifo_in_write_en_reg <= 1'b0;
+            // NOTE: The rest of the input FIFO core registers are held undefined/latched right now
             
             fifo_out_read_en_reg <= 1'b0;
             
