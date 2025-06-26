@@ -112,7 +112,7 @@ module fft_top (
         // posedge 2: FF2 samples the stable output of FF1, without any metastability. However, if FF1 resolved to
         //            the incorrect value, FF2 would sample that incorrect value.
         //            FF1 samples !rst_n again. Since RESET_N doesn't change, FF1 latches the correct value.
-        // posedge 3: FF2 samples the stable output of FF1, which is now the correctly value.
+        // posedge 3: FF2 samples the stable output of FF1, which is now the correct value.
     end
     assign fifo_sync_reset = reset_sync_reg2;
     
