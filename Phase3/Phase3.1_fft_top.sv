@@ -3,7 +3,7 @@
 // Company: 
 // Engineer: 
 // 
-// Create Date: 10.06.2025 17:47:01
+// Create Date: 26.06.2025 01:28:31
 // Design Name: 
 // Module Name: fft_top
 // Project Name: 
@@ -26,17 +26,17 @@ module fft_top (
     
     inout wire MPU_SCL,         // PMOD JA, Pin J1
     inout wire MPU_SDA,         // PMOD JA, Pin L2
-    // NOTE: Since both SDA and SCL (clock stretching) can be controlled by both i2c_master and slave (MPU6050),
+    // NOTE: Since both SDA and SCL (clock stretching) can be controlled by both i2c_master and slave (MPU-6050),
     // these must be modelled as inout ports.
     
     output wire UART_TXD        // UART Transmit Data line, Pin A18
 );
     
     // --- Internal Signals ---
-    logic rst_n;                        // Internal active-low reset signal
-    assign rst_n = RESET_N;
-    // The above code seems redundant for the i2c_master and uart_tx modules, which both have active-low resets.
-    // However, in case any other module in the future requires a reset signal, which may be active-high, we need to have the
+    logic   rst_n;                          // Internal active-low reset signal
+    assign  rst_n = RESET_N;
+    // The above code seems redundant for modules that have active-low resets.
+    // However, in case of modules (like the FIFO IP cores) requiring an active-high reset signal, we need to have the
     // wire rst_n which we can alter as per our requirements (active-high vs active-low), while still using the same external switch.
     
     
@@ -76,39 +76,27 @@ module fft_top (
     logic uart_busy_sig;                // Busy signal from UART TX module
     
     
-    // --- Internal Signals for Input FIFO BRAM Buffer ---
-    logic           fifo_in_sync_reset;     // wire
-    logic           reset_sync_reg1;
-    logic           reset_sync_reg2;
-    // The "srst" port of the FIFO Generator IP is a synchronous reset.
-    // "Synchronous" means that the reset only happens on the rising edge of the clk.
-    // We cannot directly connect to RESETN switch since that is asynchronous, and could cause metastability in the FIFO core.
-    // Thus, we update this in a separate always_ff block, synchronised with the clk.
-    // For this, we will use a two-flop synchronizer chain:
-    always_ff @(posedge CLK100MHZ) begin
-        // First flop: Samples the asynchronous switch input.
-        // This flop is allowed to go metastable.
-        // We also invert the signal here since your switch is active-low (rst_n).
-        reset_sync_reg1 <= !rst_n; 
-        
-        // Second flop: Samples the output of the first flop.
-        // It has a full clock cycle for the first flop to settle.
-        // The output of this flop is guaranteed to be stable.
-        reset_sync_reg2 <= reset_sync_reg1;
-    end
-    assign fifo_in_sync_reset = reset_sync_reg2;
+    // NOTE: The FIFO IP cores are configured in First Word Fall Through (FWFT) mode instead of Standard mode. This reduces latency by 
+    // eliminating the initial one-cycle delay on the first read. Although throughput remains the SAME in both modes after the initial read,
+    // single-cycle AXIS streaming is much simpler in FWFT mode. Standard mode can only achieve single-cycle streaming using a 
+    // complex pipelined look-ahead logic.
     
-    logic           fifo_in_write_en_reg;
-    logic [15:0]    fifo_in_write_data_reg;
+    // --- Internal Signals for Input FIFO Buffer ---
+    logic           fifo_in_write_en_reg;       // 1-cycle enable pulse for writing into the buffer; register for sequential I2C logic
+    logic [15:0]    fifo_in_write_data_reg;     // Register bus for sequential I2C logic. Only 16-bit real input values are stored to save resources; imag=0
     
-    logic           fifo_in_read_en_reg;
+    logic           fifo_in_read_en;            // 1-cycle enable pulse for reading from the buffer; wire for combinational AXIS logic
     logic [15:0]    fifo_in_read_data;
     
-    logic           fifo_in_full;
-    logic           fifo_in_empty;
+    logic           fifo_in_full;               // Output wire indicating FIFO is full (1025 samples); should never be HIGH as we only store 1024 samples
+    logic           fifo_in_empty;              // Output wire indicating FIFO is empty
     
-    // Counter for counting inputting exactly 1024 words in the FIFO buffer (1026 is the actual depth):
-    logic [10:0]     fifo_in_write_counter_reg; // 11 bits, since I want to include 1024 as a comparison
+    // Counter for inputting exactly 1024 samples to the FIFO buffer (1025 is the actual depth):
+    logic [10:0]    fifo_in_write_counter_reg;  // Incremented every time a sample is written. 11-bit, since we need to represent values till 1024
+                                                // (10-bit is 0-1023)
+    
+    // NOTE: This buffer's input logic is sequential for slow I2C, but output logic is combinational for fast AXI4-Stream.
+    // Combinational logic is needed in AXI4-Stream for reading in a single clock cycle.
     
     
     // --- Instantiating I2C Master module ---
@@ -154,10 +142,10 @@ module fft_top (
     
     // --- Instantiating UART TX Module ---
     uart_tx #(
-        .BIT_RATE(115200),          // Baud rate
-        .CLK_HZ(100_000_000),       // System clock frequency
-        .PAYLOAD_BITS(8),           // Number of data bits
-        .STOP_BITS(1)               // Number of stop bits
+        .BIT_RATE(115200),                  // Baud rate
+        .CLK_HZ(100_000_000),               // System clock frequency
+        .PAYLOAD_BITS(8),                   // Number of data bits
+        .STOP_BITS(1)                       // Number of stop bits
     ) uart_transmitter_inst (
         .clk(CLK100MHZ),                    // System clock
         .resetn(rst_n),                     // Active-low reset
@@ -168,19 +156,19 @@ module fft_top (
     );
     
     
-    // --- Instantiating Input FIFO Buffer ---
-    fifo_buffer in_fifo_buffer_inst (
-        .clk(CLK100MHZ),                // input wire clk
-        .srst(fifo_in_sync_reset),      // input wire srst
+    // --- Instantiating the FIFO IP for Input Buffer ---
+    in_fifo_buffer in_fifo_buffer_inst (
+        .clk(CLK100MHZ),                    // (input wire) System clock
+        .rst(!rst_n),                       // (input wire) Asynchronous active-high reset; negate rst_n to handle active-high
         
-        .din(fifo_in_write_data_reg),   // input wire [15 : 0] din
-        .wr_en(fifo_in_write_en_reg),   // input wire wr_en
+        .din(fifo_in_write_data_reg),       // (input wire [15:0])
+        .wr_en(fifo_in_write_en_reg),       // (input wire)
         
-        .rd_en(fifo_in_read_en_reg),    // input wire rd_en
-        .dout(fifo_in_read_data),       // output wire [15 : 0] dout
+        .rd_en(fifo_in_read_en),            // (input wire)
+        .dout(fifo_in_read_data),           // (output wire [15:0])
         
-        .full(fifo_in_full),            // output wire full
-        .empty(fifo_in_empty)           // output wire empty
+        .full(fifo_in_full),                // (output wire)
+        .empty(fifo_in_empty)               // (output wire)
     );
     
     
@@ -208,11 +196,10 @@ module fft_top (
         S_I2C_ACCEL_XOUT_ENABLE,                    // Enable the burst instance of the i2c_master module
         S_I2C_ACCEL_XOUT_BUSY_HIGH_ENABLE_LOW,      // If busy is HIGH, pull enable LOW
         S_I2C_ACCEL_XOUT_WAIT_BUSY_LOW,             // Wait till i2c_master busy wire is LOW
-        S_I2C_ACCEL_XOUT_READ_OUTPUT,               // Read the ACCEL_XOUT_H register (ACCEL_XOUT_L is still on the output wire of the burst instance)
-                                                    // NEW: Read the ACCEL_XOUT_H and ACCEL_XOUT_L registers.
+        S_I2C_ACCEL_XOUT_READ_OUTPUT,               // Read the ACCEL_XOUT_H and ACCEL_XOUT_L registers
         
-        // 4. Inputting accelerometer readings to FIFO buffer:
-        S_FIFO_IN_WRITE_ENABLE,
+        // 4. Writing accelerometer readings to input FIFO buffer
+        S_FIFO_IN_WRITE_ENABLE,                 // Pulse fifo_in_write_en_reg for 1 system clock cycle
         
         // 5. Sending ACCEL_XOUT_H over UART
         S_UART_ACCEL_XOUT_H_PULSE_ENABLE,       // Pulse the uart_tx enable wire for 1 system clock cycle
@@ -235,17 +222,17 @@ module fft_top (
         S_UART_WHO_AM_I_PULSE_ENABLE,           // Pulse the uart_tx enable wire for 1 system clock cycle
         S_UART_WHO_AM_I_WAIT_BUSY_LOW,          // Wait till the uart_tx busy wire is LOW
         
-        // 9. Sending FIFO buffer's data over UART (higher byte):
-        S_UART_FIFO_IN_H_LATCH,             // Latch the ACCEL_XOUT_H value to the uart_tx input data_to_transmit_reg
-        S_UART_FIFO_IN_H_PULSE_ENABLE,       // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_IN_H_WAIT_BUSY_LOW,      // Wait till the uart_tx busy wire is LOW
+        // 9. Sending ACCEL_XOUT_H in input FIFO buffer over UART
+        S_UART_FIFO_OUT_H_LATCH,                // Latch the FIFO's ACCEL_XOUT_H to the uart_tx input data_to_transmit_reg
+        S_UART_FIFO_OUT_H_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_FIFO_OUT_H_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
         
-        // 10. Sending FIFO buffer's data over UART (lower byte):
-        S_UART_FIFO_IN_L_LATCH,              // Latch the ACCEL_XOUT_L value to the uart_tx input data_to_transmit_reg (previously stored ACCEL_XOUT_H)
-        S_UART_FIFO_IN_L_PULSE_ENABLE,       // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_IN_L_WAIT_BUSY_LOW,      // Wait till the uart_tx busy wire is LOW
+        // 10. Sending ACCEL_XOUT_L in input FIFO buffer over UART
+        S_UART_FIFO_OUT_L_LATCH,                // Latch the FIFO's ACCEL_XOUT_L to the uart_tx input data_to_transmit_reg
+        S_UART_FIFO_OUT_L_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_FIFO_OUT_L_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
         
-        S_DONE
+        S_DONE                                  // Reset all the counters used in the FSM
     } main_state_t;
     
     main_state_t current_state, next_state;
@@ -266,7 +253,7 @@ module fft_top (
     // NOTE: The I2C logic is both sequential and combinational
     always_ff @(posedge CLK100MHZ or negedge rst_n) begin
         if (!rst_n) begin
-            // Reset values for all outputs controlled by this FSM
+            // Reset values for all registers controlled by this FSM
             i2c_enable_to_master_reg <= 1'b0;
             i2c_read_write_to_master_reg <= 1'b0;
             i2c_mosi_data_to_master_reg <= 8'h00;
@@ -281,18 +268,16 @@ module fft_top (
             
             fifo_in_write_en_reg <= 1'b0;
             fifo_in_write_data_reg <= 16'b0;
-            fifo_in_read_en_reg <= 1'b0;
             fifo_in_write_counter_reg <= 11'b0;
             
         end else begin
             // Defaults:
             i2c_enable_to_master_reg <= 1'b0;
             i2c_enable_burst_to_master_reg <= 1'b0;
-            // The rest of the I2C registers are held undefined/latched right now
+            // NOTE: The rest of the I2C registers are held undefined/latched right now
             
             fifo_in_write_en_reg <= 1'b0;
-            fifo_in_read_en_reg <= 1'b0;
-            // The rest of the buffer registers are held undefined/latched right now.
+            // NOTE: The rest of the input FIFO core registers are held undefined/latched right now
             
             case (current_state)
                 
@@ -356,8 +341,8 @@ module fft_top (
                 end
                 
                 S_I2C_ACCEL_XOUT_READ_OUTPUT: begin
-                    // Actually read the i2c_master master
-                    fifo_in_write_data_reg <= i2c_miso_data_burst_from_master;
+                    // Actually read the i2c_master module's output:
+                    fifo_in_write_data_reg <= i2c_miso_data_burst_from_master;      // Writing to input FIFO buffer
                     
                     // For UART:
                     data_to_transmit_reg <= i2c_miso_data_burst_from_master[15:8];
@@ -366,16 +351,15 @@ module fft_top (
                 end
                 
                 
-                // 4. Inputting accelerometer readings to FIFO buffer:
+                // 4. Writing accelerometer readings to input FIFO buffer
                 
                 S_FIFO_IN_WRITE_ENABLE: begin
                     if (!fifo_in_full) begin
-                        // Write to the FIFO buffer only if it has less than 1024 words (and it is NOT full, which it won't be since actual depth is 1026):
-                        fifo_in_write_en_reg <= 1'b1;
+                        fifo_in_write_en_reg <= 1'b1;   // Pulse write enable (check for 1024 samples is handled combinationally)
+                        
+                        // Increment counter indicating a write to the FIFO buffer:
+                        fifo_in_write_counter_reg <= fifo_in_write_counter_reg + 1;
                     end
-                    
-                    // Increment the counter:
-                    fifo_in_write_counter_reg <= fifo_in_write_counter_reg + 1;
                 end
                 
                 
@@ -407,32 +391,34 @@ module fft_top (
                 end
                 
                 S_I2C_WHO_AM_I_READ_OUTPUT: begin
-                    // Actually read the i2c_master master
+                    // Actually read the i2c_master module's output:
                     data_to_transmit_reg <= i2c_miso_data_from_master;      // 8'h68 (ASCII 'h') is the ideal return from WHO_AM_I
                 end
                 
                 
-                // 9. Sending FIFO buffer's data over UART (higher byte):
+                // 9. Sending ACCEL_XOUT_H in input FIFO buffer over UART
                 
-                S_UART_FIFO_IN_H_LATCH: begin
-                    fifo_in_write_counter_reg <= 11'b0; //reset this
-                    
+                S_UART_FIFO_OUT_H_LATCH: begin
                     if (!fifo_in_empty) begin
-                        // Latch the higher byte to uart_tx's data_to_transmit_reg for transmission
+                        // Latch the input FIFO's ACCEL_XOUT_H to uart_tx's data_to_transmit_reg for transmission
                         data_to_transmit_reg <= fifo_in_read_data[15:8];
                     end
                 end
                 
                 
-                // 10. Sending FIFO buffer's data over UART (lower byte):
-                S_UART_FIFO_IN_L_LATCH: begin
+                // 10. Sending ACCEL_XOUT_L in input FIFO buffer over UART
+                
+                S_UART_FIFO_OUT_L_LATCH: begin
                     if (!fifo_in_empty) begin
-                        // Latch the lower byte to uart_tx's data_to_transmit_reg for transmission
+                        // Latch the input FIFO's ACCEL_XOUT_L to uart_tx's data_to_transmit_reg for transmission
                         data_to_transmit_reg <= fifo_in_read_data[7:0];
-                        
-                        // Assert read enable to request the next word
-                        fifo_in_read_en_reg <= 1'b1; // read; output is available on the same clock cycle
                     end
+                end
+                
+                
+                S_DONE: begin
+                    // Resetting all the counters used in the FSM:
+                    fifo_in_write_counter_reg <= 11'b0;
                 end
                 
             endcase
@@ -441,14 +427,17 @@ module fft_top (
     
     
     // --- FSM Combinational Logic ---
-    // NOTE: The UART logic is fully combinational
+    // NOTE: The AXI4-Stream and UART logic is purely combinational
     always_comb begin
         // Defaults:
-        uart_tx_en_pulse_sig = 1'b0;    // When in any other state except S_UART_PULSE_ENABLE, uart_tx_en_pulse_sig is LOW by default
+        uart_tx_en_pulse_sig = 1'b0;
         
         next_state = current_state;     // By default, stay in current_state, unless explicitly mentioned in a case
         
+        fifo_in_read_en = 1'b0;
+        
         case (current_state)
+            
             S_IDLE: begin
                 next_state = S_I2C_PWR_MGMT_1_CONFIG;
             end
@@ -566,7 +555,7 @@ module fft_top (
             end
             
             
-            // 4. Inputting accelerometer readings to FIFO buffer:
+            // 4. Writing accelerometer readings to input FIFO buffer
             
             S_FIFO_IN_WRITE_ENABLE: begin
                 next_state = S_UART_ACCEL_XOUT_H_PULSE_ENABLE;
@@ -675,72 +664,76 @@ module fft_top (
             S_UART_WHO_AM_I_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig) begin
-                    if (fifo_in_write_counter_reg == 1024 || fifo_in_full) // go to fifo reading if counter indicates 1024 words have been written
-                        next_state = S_UART_FIFO_IN_H_LATCH;
+                    if (fifo_in_write_counter_reg >= 1024 || fifo_in_full)  // If 1024 samples written to FIFO buffer, transition to FFT AXIS logic
+                        next_state = S_UART_FIFO_OUT_H_LATCH;
                     else
-                        next_state = S_DONE;
+                        next_state = S_I2C_ACCEL_XOUT_CONFIG;               // Loop back to burst reading accelerometer values
                 end else
                     next_state = S_UART_WHO_AM_I_WAIT_BUSY_LOW;
             end
             
             
-            // 9.
+            // 9. Sending ACCEL_XOUT_H in input FIFO buffer over UART
             
-            S_UART_FIFO_IN_H_LATCH: begin
+            S_UART_FIFO_OUT_H_LATCH: begin
                 // Just wait 1 clock cycle to latch the higher byte to uart_tx's data_to_transmit_reg
-                next_state = S_UART_FIFO_IN_H_PULSE_ENABLE;
+                next_state = S_UART_FIFO_OUT_H_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_IN_H_PULSE_ENABLE: begin
+            S_UART_FIFO_OUT_H_PULSE_ENABLE: begin
                 uart_tx_en_pulse_sig = !uart_busy_sig && rst_n;         // HIGH only when the UART TX module is NOT busy and NOT in reset
                 // uart_tx_en_pulse_sig is HIGH for 1 cycle, since the FSM states last 1 clock cycle each
                 
                 if (uart_tx_en_pulse_sig)
-                    next_state = S_UART_FIFO_IN_H_WAIT_BUSY_LOW;     // Only transition to the next state once enable signal is HIGH
+                    next_state = S_UART_FIFO_OUT_H_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
                 else
-                    next_state = S_UART_FIFO_IN_H_PULSE_ENABLE;
+                    next_state = S_UART_FIFO_OUT_H_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_IN_H_WAIT_BUSY_LOW: begin
+            S_UART_FIFO_OUT_H_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig)
-                    next_state = S_UART_FIFO_IN_L_LATCH;
+                    next_state = S_UART_FIFO_OUT_L_LATCH;
                 else
-                    next_state = S_UART_FIFO_IN_H_WAIT_BUSY_LOW;
+                    next_state = S_UART_FIFO_OUT_H_WAIT_BUSY_LOW;
             end
             
             
-            // 10.
+            // 10. Sending ACCEL_XOUT_L in input FIFO buffer over UART
             
-            S_UART_FIFO_IN_L_LATCH: begin
+            S_UART_FIFO_OUT_L_LATCH: begin
                 // Just wait 1 clock cycle to latch the lower byte to uart_tx's data_to_transmit_reg
-                next_state = S_UART_FIFO_IN_L_PULSE_ENABLE;
+                next_state = S_UART_FIFO_OUT_L_PULSE_ENABLE;
+                
+                // Assert read enable to request the next word from the input FIFO buffer:
+                if (!fifo_in_empty)
+                    fifo_in_read_en = 1'b1;    // Pulse enable for NEXT word due to FWFT mode
             end
             
-            S_UART_FIFO_IN_L_PULSE_ENABLE: begin
+            S_UART_FIFO_OUT_L_PULSE_ENABLE: begin
                 uart_tx_en_pulse_sig = !uart_busy_sig && rst_n;         // HIGH only when the UART TX module is NOT busy and NOT in reset
                 // uart_tx_en_pulse_sig is HIGH for 1 cycle, since the FSM states last 1 clock cycle each
                 
                 if (uart_tx_en_pulse_sig)
-                    next_state = S_UART_FIFO_IN_L_WAIT_BUSY_LOW;     // Only transition to the next state once enable signal is HIGH
+                    next_state = S_UART_FIFO_OUT_L_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
                 else
-                    next_state = S_UART_FIFO_IN_L_PULSE_ENABLE;
+                    next_state = S_UART_FIFO_OUT_L_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_IN_L_WAIT_BUSY_LOW: begin
+            S_UART_FIFO_OUT_L_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig) begin
                     if (fifo_in_empty)
                         next_state = S_DONE;
                     else
-                        next_state = S_UART_FIFO_IN_H_LATCH;
+                        next_state = S_UART_FIFO_OUT_H_LATCH;
                 end else
-                    next_state = S_UART_FIFO_IN_L_WAIT_BUSY_LOW;
+                    next_state = S_UART_FIFO_OUT_L_WAIT_BUSY_LOW;
             end
             
             
             S_DONE: begin
-                next_state = S_I2C_ACCEL_XOUT_CONFIG;    // Loop back to burst reading accelerometer values
+                next_state = S_I2C_ACCEL_XOUT_CONFIG;       // Loop back to burst reading accelerometer values
             end
             
         endcase
