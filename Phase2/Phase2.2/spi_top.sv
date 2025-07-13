@@ -46,8 +46,8 @@ module spi_top (
     logic [7:0] spi_receive_byte_from_master;
     logic       spi_receive_data_valid_from_master;
     
-    // Timer for a 20 ms delay between SPI transactions:
-    localparam DELAY_COUNT_MAX = 2_000_000;
+    // Timer for a 5 ms delay between SPI transactions:
+    localparam DELAY_COUNT_MAX = 500_000;
     logic [$clog2(DELAY_COUNT_MAX)-1:0] delay_counter_reg;
     
     
@@ -102,24 +102,24 @@ module spi_top (
     
     // --- Defining the FSM states ---
     typedef enum logic [2:0] {
-        S_IDLE,
+        S_SPI_IDLE,
         
         S_SPI_SEND_FRAME,           // Send the SPI frame one byte at-a-time
         S_SPI_DELAY,                // Delay between transactions to ensure ESP32 is ready to receive
         
         S_SPI_DONE                  // Reset all the counters used in the FSM
-    } main_state_t;
+    } spi_state_t;
     
-    main_state_t current_state, next_state;
+    spi_state_t spi_current_state, spi_next_state;
     
     // NOTE: We need a separate always_ff block to update current_state. Otherwise, if we used the same always_ff block as the
     // rest of the sequential logic, the case(current_state) won't know which current_state to use: the one that just updated
     // vs one that was used in the previous cycle. This causes a Synthesis Error.
     always_ff @(posedge CLK100MHZ or negedge rst_n) begin
         if (!rst_n) begin
-            current_state <= S_IDLE;
+            spi_current_state <= S_SPI_IDLE;
         end else begin
-            current_state <= next_state;
+            spi_current_state <= spi_next_state;
         end
     end
     
@@ -137,7 +137,7 @@ module spi_top (
             // Defaults:
             spi_transmit_data_valid_to_master_reg <= 1'b0;
             
-            case (current_state)
+            case (spi_current_state)
                 
                 S_SPI_SEND_FRAME: begin
                     // Handshaking: Pulse enable for 1 cycle if we receive the ready to transmit signal from SPI master
@@ -165,31 +165,31 @@ module spi_top (
     // --- FSM Combinational Logic ---
     always_comb begin
         // Defaults:
-        next_state = current_state;     // By default, stay in current_state, unless explicitly mentioned in a case
+        spi_next_state = spi_current_state;                 // By default, stay in spi_current_state, unless explicitly mentioned in a case
         
-        case (current_state)
-            S_IDLE: begin
+        case (spi_current_state)
+            S_SPI_IDLE: begin
                 // NOTE: Add logic to leave this state ONLY after the processed FFT data is ready and we have not yet completed 1024 transactions.
-                next_state = S_SPI_SEND_FRAME;
+                spi_next_state = S_SPI_SEND_FRAME;
             end
             
             S_SPI_SEND_FRAME: begin
                 // Send the SPI frame one byte at-a-time
-                if (byte_counter_reg >= 8)                      // Means last byte (8) was sent to SPI Master for transmitting; we exit this state
-                    next_state = S_SPI_DELAY;
+                if (byte_counter_reg >= 8)                  // Means last byte (8) was sent to SPI Master for transmitting; we exit this state
+                    spi_next_state = S_SPI_DELAY;
                 else
-                    next_state = S_SPI_SEND_FRAME;
+                    spi_next_state = S_SPI_SEND_FRAME;
             end
             
             S_SPI_DELAY: begin
                 if (delay_counter_reg >= DELAY_COUNT_MAX)
-                    next_state = S_SPI_DONE;
+                    spi_next_state = S_SPI_DONE;
                 else
-                    next_state = S_SPI_DELAY;
+                    spi_next_state = S_SPI_DELAY;
             end
             
             S_SPI_DONE: begin
-                next_state = S_IDLE;    // Loop back
+                spi_next_state = S_SPI_IDLE;    // Loop back
             end
             
         endcase
