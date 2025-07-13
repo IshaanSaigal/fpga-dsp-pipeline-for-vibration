@@ -23,7 +23,6 @@
 module spi_top (
     input wire CLK100MHZ,       // 100MHz clock pin, Pin W5
     input wire RESET_N,         // Active-low reset switch
-    input wire BYTE_SWITCH,     // Switch for controlling the byte to be sent over SPI
     
     output wire SPI_CS_N,       // PMOD JB, Pin A14
     output wire SPI_SCLK,       // PMOD JB, Pin A16
@@ -34,36 +33,50 @@ module spi_top (
     // --- Internal Signals ---
     logic rst_n;                        // Internal active-low reset signal
     assign rst_n = RESET_N;
-    // The above code seems redundant for the spi_master module, which has active-low reset.
-    // However, in case any other module in the future requires a reset signal, which may be active-high, we need to have the
-    // wire rst_n which we can alter as per our requirements (active-high vs active-low), while still using the same external switch.
     
     
     // --- Internal Signals for SPI Master ---
     // Internal signals for MOSI:
-    logic       spi_transmit_byte_counter_to_master_reg;            // 1-bit only since we only want to transmit 1-byte right now
-    logic [7:0] spi_transmit_byte_to_master_reg;
+    logic [7:0] spi_transmit_byte_to_master_reg;                // Wire holding the current byte of the SPI transaction
     logic       spi_transmit_data_valid_to_master_reg;
     logic       spi_transmit_data_ready_from_master;
     
     // Internal signals for MISO (just for initializing; won't be using them here):
-    logic       spi_receive_byte_counter_from_master;
+    logic [4:0] spi_receive_byte_counter_from_master;
     logic [7:0] spi_receive_byte_from_master;
     logic       spi_receive_data_valid_from_master;
     
-    // Counter for delay in sending data:
-    logic [20:0] spi_delay_counter_reg;     // 21-bit for counting up to 2,000,000 cycles (20ms)
-    // NOTE: Without an explicit delay, there is only a 30ns difference between consecutive SPI transactions,
-    // which cannot be detected by the SPI Slave on ESP32.
+    // Timer for a 20 ms delay between SPI transactions:
+    localparam DELAY_COUNT_MAX = 2_000_000;
+    logic [$clog2(DELAY_COUNT_MAX)-1:0] delay_counter_reg;
+    
+    
+    // Assume output to transmit:
+    logic [47:0]    fft_output_sample;
+    assign fft_output_sample = 48'hF1020304056F;    // First and last bits are 1s to detect data loss at the edges of transaction
+    
+    logic [3:0] byte_counter_reg;//temp 4bits       // Byte counter for slicing the output bytes to transmit
+    // Multiplexer logic:
+    always_comb begin
+        case (byte_counter_reg)
+            4'd1:       spi_transmit_byte_to_master_reg = fft_output_sample[47:40]; // Byte 0 (MSB)
+            4'd2:       spi_transmit_byte_to_master_reg = fft_output_sample[39:32]; // Byte 1
+            4'd3:       spi_transmit_byte_to_master_reg = fft_output_sample[31:24]; // Byte 2
+            4'd4:       spi_transmit_byte_to_master_reg = fft_output_sample[23:16]; // Byte 3
+            4'd5:       spi_transmit_byte_to_master_reg = fft_output_sample[15:8];  // Byte 4
+            4'd6:       spi_transmit_byte_to_master_reg = fft_output_sample[7:0];   // Byte 5 (LSB)
+            default:    spi_transmit_byte_to_master_reg = 8'hAB;                    // Value for padding the 6 bytes to 8 bytes for DMA on ESP32
+        endcase
+    end
     
     
     // --- Instantiating SPI Master module ---
-    // NOTE: Using the default parameters of the SPI_Master_With_Single_CS module:
+    // NOTE: Using these default parameters of the SPI_Master_With_Single_CS module:
     // - SPI mode = 0,
     // - SPI_SCLK frequency = 25MHz
     // - SPI_CS_N stays HIGH for a minimum of 1 system clock cycle when idle
     SPI_Master_With_Single_CS #(
-        .MAX_BYTES_PER_CS(1)        // Can send only 1 byte in an SPI transaction (between CS being pulled LOW and going idle HIGH again)
+        .MAX_BYTES_PER_CS(24)           // Can send up to 24 bytes in one SPI transaction (between CS being pulled LOW and going idle HIGH again)
     ) spi_master_inst (
         .i_Rst_L(RESET_N),
         .i_Clk(CLK100MHZ),
@@ -75,7 +88,7 @@ module spi_top (
         .i_SPI_MISO(SPI_MISO),
         
         // Signals for the MOSI line:
-        .i_TX_Count(spi_transmit_byte_counter_to_master_reg),
+        .i_TX_Count(5'd8),  // Tying to fixed 6 bytes per transaction (1 output sample for 1 axis). Port is 5-bit because clog2(MAX_BYTES_PER_CS)
         .i_TX_Byte(spi_transmit_byte_to_master_reg),
         .i_TX_DV(spi_transmit_data_valid_to_master_reg),
         .o_TX_Ready(spi_transmit_data_ready_from_master),
@@ -91,11 +104,10 @@ module spi_top (
     typedef enum logic [2:0] {
         S_IDLE,
         
-        S_SPI_CONFIG,
-        S_SPI_ENABLE,
-        S_SPI_WAIT_READY_HIGH,
+        S_SPI_SEND_FRAME,           // Send the SPI frame one byte at-a-time
+        S_SPI_DELAY,                // Delay between transactions to ensure ESP32 is ready to receive
         
-        S_DONE
+        S_SPI_DONE                  // Reset all the counters used in the FSM
     } main_state_t;
     
     main_state_t current_state, next_state;
@@ -117,35 +129,32 @@ module spi_top (
     always_ff @(posedge CLK100MHZ or negedge rst_n) begin
         if (!rst_n) begin
             // Reset values for all registers controlled by this FSM
-            spi_transmit_byte_counter_to_master_reg <= 1'b0;
-            spi_transmit_byte_to_master_reg <= 8'h00;
             spi_transmit_data_valid_to_master_reg <= 1'b0;
-            spi_delay_counter_reg <= 21'b0;
+            delay_counter_reg <= '0;
+            byte_counter_reg <= '0;     // Initialized to 0. In the 1st iteration of S_SPI_SEND_FRAME, it becomes 1, corresponding to 1st byte
             
         end else begin
             // Defaults:
-            spi_transmit_byte_counter_to_master_reg <= 1'b1;
             spi_transmit_data_valid_to_master_reg <= 1'b0;
             
             case (current_state)
                 
-                S_IDLE: begin
-                    // Increment the delay counter:
-                    spi_delay_counter_reg <= spi_delay_counter_reg + 1;
+                S_SPI_SEND_FRAME: begin
+                    // Handshaking: Pulse enable for 1 cycle if we receive the ready to transmit signal from SPI master
+                    if (spi_transmit_data_ready_from_master) begin          // Means SPI Master is ready to send a new byte
+                        spi_transmit_data_valid_to_master_reg <= 1'b1;
+                        byte_counter_reg <= byte_counter_reg + 1;           // Increment to the next byte for the next loop
+                    end
                 end
                 
-                S_SPI_CONFIG: begin
-                    spi_transmit_byte_to_master_reg <= BYTE_SWITCH ? 8'h59 : 8'h4E;
-                    // If the BYTE_SWITCH is HIGH, send ASCII "Y". If the BYTE_SWITCH is LOW, send ASCII "N".
+                S_SPI_DELAY: begin
+                    delay_counter_reg <= delay_counter_reg + 1;
                 end
                 
-                S_SPI_ENABLE: begin
-                    spi_transmit_data_valid_to_master_reg <= 1'b1;
-                end
                 
-                S_DONE: begin
-                    // Reset the counter:
-                    spi_delay_counter_reg <= 21'b0;
+                S_SPI_DONE: begin
+                    byte_counter_reg <= '0;
+                    delay_counter_reg <= '0;
                 end
                 
             endcase
@@ -160,31 +169,26 @@ module spi_top (
         
         case (current_state)
             S_IDLE: begin
-                if (spi_delay_counter_reg >= 21'd2_000_000)     // Stay in S_IDLE for 20ms
-                    next_state = S_SPI_CONFIG;
+                // NOTE: Add logic to leave this state ONLY after the processed FFT data is ready and we have not yet completed 1024 transactions.
+                next_state = S_SPI_SEND_FRAME;
+            end
+            
+            S_SPI_SEND_FRAME: begin
+                // Send the SPI frame one byte at-a-time
+                if (byte_counter_reg >= 8)                      // Means last byte (8) was sent to SPI Master for transmitting; we exit this state
+                    next_state = S_SPI_DELAY;
                 else
-                    next_state = S_IDLE;
+                    next_state = S_SPI_SEND_FRAME;
             end
             
-            S_SPI_CONFIG: begin
-                if (spi_transmit_data_ready_from_master)
-                    next_state = S_SPI_ENABLE;      // Only pulse enable if we receive the ready to transmit signal from master
+            S_SPI_DELAY: begin
+                if (delay_counter_reg >= DELAY_COUNT_MAX)
+                    next_state = S_SPI_DONE;
                 else
-                    next_state = S_SPI_CONFIG;
+                    next_state = S_SPI_DELAY;
             end
             
-            S_SPI_ENABLE: begin
-                next_state = S_SPI_WAIT_READY_HIGH;
-            end
-            
-            S_SPI_WAIT_READY_HIGH: begin
-                if (spi_transmit_data_ready_from_master)
-                    next_state = S_DONE;
-                else
-                    next_state = S_SPI_WAIT_READY_HIGH;
-            end
-            
-            S_DONE: begin
+            S_SPI_DONE: begin
                 next_state = S_IDLE;    // Loop back
             end
             
