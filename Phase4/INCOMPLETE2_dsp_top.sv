@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
 // Company: 
-// Engineer: 
+// Engineer: Ishaan Saigal
 // 
 // Create Date: 10.06.2025 17:47:01
 // Design Name: 
@@ -41,12 +41,10 @@ module dsp_top #(
     input  wire SPI_MISO        // PMOD JB, Pin B16
 );
     
-    // --- Internal Signals ---
-    logic   rst_n;                          // Internal active-low reset signal (synchronous due to debouncer module)
-    // The above code seems redundant for modules that have active-low resets.
-    // However, in case of modules (like the FIFO IP cores) requiring an active-high reset signal, we need to have the
-    // wire rst_n which we can alter as per our requirements (active-high vs active-low), while still using the same external switch.
-    
+    // ===== Internal Signals =====
+    logic   rst_n;                          // Internal active-low reset signal
+    // NOTE: Although this signal is directly connected to the registered output of the debouncer module,
+    // and thus SHOULD be synchronous to the clock, the tools still treat this as an asynchronous signal.
     
     // --- Internal Signals for I2C ---
     logic i2c_enable_to_master_reg;
@@ -54,16 +52,11 @@ module dsp_top #(
     logic [7:0] i2c_mosi_data_to_master_reg;
     logic [7:0] i2c_register_address_to_master_reg;
     localparam IC_MPU_DEVICE_ADDRESS = 7'h68;       // MPU-6050's I2C address. Since this is constant, we use localparam
-    localparam I2C_CLK_DIVIDER = 16'd62;           // For 100kHz Standard Mode I2C. 16-bit to match i2c_master. Since this is constant, we use localparam
-    // For 100MHz system clk, 100kHz SCL clk:
-    // f_SCL = f_CLK / (4 * (divider + 1))
-    // => 100kHz = 100MHz / (4 * (divider + 1))
-    // => divider = 249
-    
+    localparam I2C_CLK_DIVIDER = 16'd62;            // For 100kHz Standard Mode I2C. 16-bit to match i2c_master. Since this is constant, we use localparam
     // For 100MHz system clk, 400kHz SCL clk:
     // f_SCL = f_CLK / (4 * (divider + 1))
     // => 400kHz = 100MHz / (4 * (divider + 1))
-    // => divider = 61.5 = 62       // Too fast; repeated samples
+    // => divider = 61.5 = 62
     
     logic [7:0] i2c_miso_data_from_master;
     logic i2c_busy_from_master;
@@ -99,7 +92,6 @@ module dsp_top #(
     logic [15:0] hamming_coeff_reg; // 16-bit register for storing Hamming window coefficient // unsigned
     
     logic signed [15:0] raw_accel_x_reg, raw_accel_y_reg, raw_accel_z_reg; // raw MPU-6050 accelerometer readings
-    //logic signed [31:0] product_x_reg, product_y_reg, product_z_reg; // 32-bit to store 16-bit * 16-bit output
     logic signed [63:0] product_x_reg, product_y_reg, product_z_reg; // 64-bit to store 32-bit * 32-bit output
     // NOTE: these must be signed. otherwise multiplications with -ve values are not handled. The raw MPU-6050 data is signed.
     // The product should also be signed (to preserve the sign of the raw value). The hamm coeffs are unsigned since all are +ve
@@ -221,10 +213,9 @@ module dsp_top #(
     
     
     // --- Internal Signals for Output Handling: Block FP Scaling, Finding Magnitude Squared, Normalizing ---
-    //logic signed [15:0] raw_x_imag; assign raw_x_imag = fifo_out_read_data[95:80]; //TEMP
-    //logic signed [15:0] raw_x_real; assign raw_x_real = fifo_out_read_data[79:64]; //TEMP
     
     /*logic signed [15:0] true_x_real; assign true_x_real = (32'(raw_x_real) << blk_exp_x_reg) >>> 10; //TEMP*/
+    
     // NOTE: concatenate to make this 32-bits so that the left shift doesn't erase data
     // NOTE: SIGN EXTENSION!!!! OTHERWISE GARBAGE OUTPUT AT FREQ BINS SEEN
     // >>> is arithmetic right shift operator, which preserves the sign bit
@@ -240,11 +231,26 @@ module dsp_top #(
     
     // NOTE: WITHOUT pipelining, I get Critical Timing Warnings for true_x_magnitude_squared. The WNS is -ve.
     // Thus, I will have to pipeline it with registers.
+    // x-axis
     logic signed [15:0] raw_x_imag_reg; logic signed [15:0] raw_x_real_reg; //16-bit
     logic [31:0] raw_x_real_squared_reg, raw_x_imag_squared_reg; // 32-bit to store 16-bit * 16-bit
     logic [31:0] raw_x_real_squared_reg2, raw_x_imag_squared_reg2; // for pipelining
     logic [32:0] raw_x_magnitude_squared_reg; // 33-bit to store 32-bit + 32-bit    // NOTE: Unsigned since squares are always positive
     logic [47:0] normal_x_magnitude_squared_reg; // 48-bit to store raw_x_magnitude with up to ?? left shifts (i guess ?? will be more than enough)
+    
+    // y-axis
+    logic signed [15:0] raw_y_imag_reg; logic signed [15:0] raw_y_real_reg; //16-bit
+    logic [31:0] raw_y_real_squared_reg, raw_y_imag_squared_reg; // 32-bit to store 16-bit * 16-bit
+    logic [31:0] raw_y_real_squared_reg2, raw_y_imag_squared_reg2; // for pipelining
+    logic [32:0] raw_y_magnitude_squared_reg; // 33-bit to store 32-bit + 32-bit    // NOTE: Unsigned since squares are always positive
+    logic [47:0] normal_y_magnitude_squared_reg; // 48-bit to store raw_y_magnitude with up to ?? left shifts (i guess ?? will be more than enough)
+    
+    // z-axis
+    logic signed [15:0] raw_z_imag_reg; logic signed [15:0] raw_z_real_reg; //16-bit
+    logic [31:0] raw_z_real_squared_reg, raw_z_imag_squared_reg; // 32-bit to store 16-bit * 16-bit
+    logic [31:0] raw_z_real_squared_reg2, raw_z_imag_squared_reg2; // for pipelining
+    logic [32:0] raw_z_magnitude_squared_reg; // 33-bit to store 32-bit + 32-bit    // NOTE: Unsigned since squares are always positive
+    logic [47:0] normal_z_magnitude_squared_reg; // 48-bit to store raw_z_magnitude with up to ?? left shifts (i guess ?? will be more than enough)
     
     
     // --- Internal Signals for Normalized-Thresholds-Squared ROM ---
@@ -255,9 +261,40 @@ module dsp_top #(
                                         //NOTE: This is STILL 48-bit since max(ROM) + sensitivity cannot overflow 48-bits
     
     
-    // --- Internal Control Signals for SPI Transmission ---
+    // --- Internal Signals for SPI FIFO Buffer ---
+    logic           fifo_spi_write_en_reg;      // 1-cycle enable pulse for writing into the buffer; register for sequential I2C logic
+    logic [47:0]    fifo_spi_write_data_reg;    // Register bus
+    
+    logic           fifo_spi_read_en_reg;       // 1-cycle enable pulse for reading from the buffer; wire for combinational AXIS logic
+    logic [47:0]    fifo_spi_read_data;
+    
+    logic           fifo_spi_full;              // Output wire indicating FIFO is full (1025 samples); should never be HIGH as we only store 1024 samples
+    logic           fifo_spi_empty;             // Output wire indicating FIFO is empty
+    
+    // Counter for inputting exactly 1024 samples to the FIFO buffer (1025 is the actual depth):
+    logic [10:0]    fifo_spi_write_counter_reg;     // Incremented every time a sample is written. 11-bit, since we need to represent values till 1024
+                                                    // (10-bit is 0-1023)
+    
+    logic           fifo_spi_write_valid_reg;   // check if the first word into the SPI FIFO buffer is actually first FFT sample
+    
+    
+    // --- Internal Signals for SPI Master ---
+    // Internal signals for MOSI:
+    logic [7:0] spi_transmit_byte_to_master;                // Wire holding the current byte of the SPI transaction
+    logic       spi_transmit_data_valid_to_master_reg;
+    logic       spi_transmit_data_ready_from_master;
+    
+    // Internal signals for MISO (just for initializing; won't be using them here):
+    logic [4:0] spi_receive_byte_counter_from_master;
+    logic [7:0] spi_receive_byte_from_master;
+    logic       spi_receive_data_valid_from_master;
+    
+    // Timer for a 5 ms delay between SPI transactions: (5 ms delay does not work properly bcs of logging delays)
+    localparam DELAY_COUNT_MAX = 500_000;
+    logic [$clog2(DELAY_COUNT_MAX)-1:0] delay_counter_reg;
+    
+    // Control signal indicating start of SPI transmission
     logic spi_go_to_master_reg; // pulse for 1 cycle to trigger SPI transaction (ONLY if the SPI-FSM is idle)
-    //logic [47:0] fft_output_sample_reg; // register to hold the output to transmit
     
     
     // --- Instantiating the Debouncer module ---
@@ -412,57 +449,6 @@ module dsp_top #(
     end
     
     
-    
-    
-    
-    // --- Internal Signals for SPI FIFO Buffer ---
-    logic           fifo_spi_write_en_reg;      // 1-cycle enable pulse for writing into the buffer; register for sequential I2C logic
-    logic [47:0]    fifo_spi_write_data_reg;    // Register bus
-    
-    logic           fifo_spi_read_en_reg;       // 1-cycle enable pulse for reading from the buffer; wire for combinational AXIS logic
-    logic [47:0]    fifo_spi_read_data;
-    
-    logic           fifo_spi_full;              // Output wire indicating FIFO is full (1025 samples); should never be HIGH as we only store 1024 samples
-    logic           fifo_spi_empty;             // Output wire indicating FIFO is empty
-    
-    // Counter for inputting exactly 1024 samples to the FIFO buffer (1025 is the actual depth):
-    logic [10:0]    fifo_spi_write_counter_reg;     // Incremented every time a sample is written. 11-bit, since we need to represent values till 1024
-                                                    // (10-bit is 0-1023)
-    
-    logic           fifo_spi_write_valid_reg;   // check if the first word into the SPI FIFO buffer is actually first FFT sample
-    
-    
-    // --- Internal Signals for SPI Master ---
-    // Internal signals for MOSI:
-    logic [7:0] spi_transmit_byte_to_master;                // Wire holding the current byte of the SPI transaction
-    logic       spi_transmit_data_valid_to_master_reg;
-    logic       spi_transmit_data_ready_from_master;
-    
-    // Internal signals for MISO (just for initializing; won't be using them here):
-    logic [4:0] spi_receive_byte_counter_from_master;
-    logic [7:0] spi_receive_byte_from_master;
-    logic       spi_receive_data_valid_from_master;
-    
-    // Timer for a 10 ms delay between SPI transactions: (5 ms delay does not work properly bcs of logging delays)
-    localparam DELAY_COUNT_MAX = 1_000_000;
-    logic [$clog2(DELAY_COUNT_MAX)-1:0] delay_counter_reg;
-    
-    
-    logic [3:0] byte_counter_reg;           // Byte counter for slicing the output bytes to transmit
-    // Multiplexer logic:
-    always_comb begin
-        case (byte_counter_reg)
-            4'd1:       spi_transmit_byte_to_master = fifo_spi_read_data[47:40]; // Byte 0 (MSB)
-            4'd2:       spi_transmit_byte_to_master = fifo_spi_read_data[39:32]; // Byte 1
-            4'd3:       spi_transmit_byte_to_master = fifo_spi_read_data[31:24]; // Byte 2
-            4'd4:       spi_transmit_byte_to_master = fifo_spi_read_data[23:16]; // Byte 3
-            4'd5:       spi_transmit_byte_to_master = fifo_spi_read_data[15:8];  // Byte 4
-            4'd6:       spi_transmit_byte_to_master = fifo_spi_read_data[7:0];   // Byte 5 (LSB)
-            default:    spi_transmit_byte_to_master = 8'hAB;                    // Value for padding the 6 bytes to 8 bytes for DMA on ESP32
-        endcase
-    end
-    
-    
     // --- Instantiating the FIFO IP for SPI Buffer ---
     fifo_spi fifo_spi_inst (
         .clk(CLK100MHZ),      // (input wire)
@@ -509,6 +495,12 @@ module dsp_top #(
     );
     
     
+    
+    
+    // ===== SPI-FSM =====
+    // This FSM ...
+    // Each iteration of this FSM sends a 6kB (8 kB with padding) FFT frame.
+    
     // --- Defining the SPI-FSM states ---
     typedef enum logic [2:0] {
         S_SPI_IDLE,
@@ -532,6 +524,21 @@ module dsp_top #(
         end else begin
             spi_current_state <= spi_next_state;
         end
+    end
+    
+    
+    logic [3:0] byte_counter_reg;           // Byte counter for slicing the output bytes to transmit
+    // Multiplexer logic:
+    always_comb begin
+        case (byte_counter_reg)
+            4'd1:       spi_transmit_byte_to_master = fifo_spi_read_data[47:40];    // Byte 0 (MSB)
+            4'd2:       spi_transmit_byte_to_master = fifo_spi_read_data[39:32];    // Byte 1
+            4'd3:       spi_transmit_byte_to_master = fifo_spi_read_data[31:24];    // Byte 2
+            4'd4:       spi_transmit_byte_to_master = fifo_spi_read_data[23:16];    // Byte 3
+            4'd5:       spi_transmit_byte_to_master = fifo_spi_read_data[15:8];     // Byte 4
+            4'd6:       spi_transmit_byte_to_master = fifo_spi_read_data[7:0];      // Byte 5 (LSB)
+            default:    spi_transmit_byte_to_master = 8'hAB;                        // Value for padding the 6 bytes to 8 bytes for DMA on ESP32
+        endcase
     end
     
     
@@ -573,11 +580,6 @@ module dsp_top #(
                     byte_counter_reg <= '0;
                     delay_counter_reg <= '0;
                 end
-                
-                
-                /*S_SPI_DONE: begin
-                    //
-                end*/
                 
             endcase
         end
@@ -634,9 +636,11 @@ module dsp_top #(
     
     
     
+    // ===== DSP-FSM =====
+    // This is the main FSM for the digital signal processing of motor vibrational data.
+    // Each iteration of this FSM processes one FFT frame, computing 3 channels in parallel.
     
-    
-    // --- Defining the FSM states ---
+    // --- Defining the DSP-FSM states ---
     typedef enum logic [6:0] {
         S_IDLE,
         
@@ -654,36 +658,36 @@ module dsp_top #(
         S_I2C_ACCEL_CONFIG_BUSY_HIGH_ENABLE_LOW,    // If busy is HIGH, pull enable LOW
         S_I2C_ACCEL_CONFIG_WAIT_BUSY_LOW,           // Wait till i2c_master busy wire is LOW
         
-        // X.
-        S_WAIT_FOR_WAKEUP,  // wait till MPU-6050 wakes up. Otherwise we read 0x00 from accel registers.
+        // 3. Wakeup delay for MPU-6050
+        S_WAIT_FOR_WAKEUP,                          // Wait few ms till MPU-6050 wakes up. Otherwise we read invalid 0x00 from ACCEL registers.
         
-        // 3. Reading ACCEL_XOUT_H, ACCEL_XOUT_L, ACCEL_YOUT_H, ACCEL_YOUT_L, ACCEL_ZOUT_H, ACCEL_ZOUT_L registers (burst read)
-        S_I2C_ACCEL_XOUT_CONFIG,                    // Configure the inputs to the burst instance of the i2c_master module
-        S_I2C_ACCEL_XOUT_WAIT_BEFORE_ENABLE,        // Ensure that the inputs are stable for 1 clock cycle
-        S_I2C_ACCEL_XOUT_ENABLE,                    // Enable the burst instance of the i2c_master module
-        S_I2C_ACCEL_XOUT_BUSY_HIGH_ENABLE_LOW,      // If busy is HIGH, pull enable LOW
-        S_I2C_ACCEL_XOUT_WAIT_BUSY_LOW,             // Wait till i2c_master busy wire is LOW
-        S_I2C_ACCEL_XOUT_READ_OUTPUT,               // Read the ACCEL_XOUT_H and ACCEL_XOUT_L registers
+        // 4. Burst reading ACCEL_XOUT_H, ACCEL_XOUT_L, ACCEL_YOUT_H, ACCEL_YOUT_L, ACCEL_ZOUT_H, ACCEL_ZOUT_L registers
+        S_I2C_BURST_ACCEL_CONFIG,                   // Configure the inputs to the burst instance of the i2c_master module
+        S_I2C_BURST_ACCEL_WAIT_BEFORE_ENABLE,       // Ensure that the inputs are stable for 1 clock cycle
+        S_I2C_BURST_ACCEL_ENABLE,                   // Enable the burst instance of the i2c_master module
+        S_I2C_BURST_ACCEL_BUSY_HIGH_ENABLE_LOW,     // If busy is HIGH, pull enable LOW
+        S_I2C_BURST_ACCEL_WAIT_BUSY_LOW,            // Wait till i2c_master busy wire is LOW
+        S_I2C_BURST_ACCEL_READ_OUTPUT,              // Read the ACCEL registers
         
-        // X. Applying the Hamming Window
-        S_HAMMING_WINDOW_FETCH_COEFFICIENT,     // Fetch the Hamming window coefficient from ROM
-        S_HAMMING_WINDOW_FETCH_COEFFICIENT_WAIT, // Wait one cycle till the ROM read data is valid (BRAM read takes 2 cycles????)
-        S_HAMMING_WINDOW_PREPARE_MULTIPLY,              // for handling -ve input samples
-        S_HAMMING_WINDOW_EXECUTE_MULTIPLY, // Multiply the readings by the coefficient
+        // 5. Applying the Hamming Window
+        S_HAMMING_WINDOW_FETCH_COEFFICIENT,         // Fetch a Hamming window coefficient from ROM
+        S_HAMMING_WINDOW_FETCH_COEFFICIENT_WAIT,    // Wait one cycle till the ROM read data is valid (BRAM read takes 2 cycles????)
+        S_HAMMING_WINDOW_PREPARE_MULTIPLY,          // 1st stage of multiply pipeline: Prepare the operands
+        S_HAMMING_WINDOW_EXECUTE_MULTIPLY,          // 2nd stage of multiply pipeline: Perform the actual multiplication
         
-        // 4. Writing windowed accelerometer readings to input FIFO buffer
+        // 6. Writing windowed accelerometer readings to input FIFO buffer
         S_FIFO_IN_WRITE_ENABLE,                 // Pulse fifo_in_write_en_reg for 1 system clock cycle
         
-        // 5. Sending ACCEL_XOUT_H over UART
+        // 7. Sending ACCEL_XOUT_H over UART
         S_UART_ACCEL_XOUT_H_PULSE_ENABLE,       // Pulse the uart_tx enable wire for 1 system clock cycle
         S_UART_ACCEL_XOUT_H_WAIT_BUSY_LOW,      // Wait till the uart_tx busy wire is LOW
         
-        // 6. Sending ACCEL_XOUT_L over UART
+        // 8. Sending ACCEL_XOUT_L over UART
         S_UART_ACCEL_XOUT_L_LATCH,              // Latch the ACCEL_XOUT_L value to the uart_tx input data_to_transmit_reg (previously stored ACCEL_XOUT_H)
         S_UART_ACCEL_XOUT_L_PULSE_ENABLE,       // Pulse the uart_tx enable wire for 1 system clock cycle
         S_UART_ACCEL_XOUT_L_WAIT_BUSY_LOW,      // Wait till the uart_tx busy wire is LOW
         
-        // 7. Reading WHO_AM_I register
+        // 9. Reading WHO_AM_I register
         S_I2C_WHO_AM_I_CONFIG,                  // Configure the inputs to the i2c_master module
         S_I2C_WHO_AM_I_WAIT_BEFORE_ENABLE,      // Ensure that the inputs are stable for 1 clock cycle
         S_I2C_WHO_AM_I_ENABLE,                  // Enable the i2c_master module
@@ -691,66 +695,65 @@ module dsp_top #(
         S_I2C_WHO_AM_I_WAIT_BUSY_LOW,           // Wait till i2c_master busy wire is LOW
         S_I2C_WHO_AM_I_READ_OUTPUT,             // Read the WHO_AM_I register's value
         
-        // 8. Sending WHO_AM_I over UART
+        // 10. Sending WHO_AM_I over UART
         S_UART_WHO_AM_I_PULSE_ENABLE,           // Pulse the uart_tx enable wire for 1 system clock cycle
         S_UART_WHO_AM_I_WAIT_BUSY_LOW,          // Wait till the uart_tx busy wire is LOW
         
-        // X.
+        // 11. Wait 1 ms between consecutive samples to maintain 1 kHz sampling rate
         S_WAIT_BEFORE_NEXT_BURST_READ, // wait exactly 1ms
         
-        // 9. Streaming the 1024-sample input frame from the input FIFO buffer to the FFT core
+        // 12. Streaming the 1024-sample input frame from the input FIFO buffer to the FFT core
         S_FFT_INPUT_FRAME,                      // High-speed combinational logic for AXIS flit transfer on every clock cycle
         
-        // 10. Streaming the 1024-sample output frame from the FFT core to the output FIFO buffer
+        // 13. Streaming the 1024-sample output frame from the FFT core to the output FIFO buffer
         S_FFT_OUTPUT_FRAME,                     // High-speed combinational logic for AXIS flit transfer on every clock cycle
         
-        // X. AXIS handshake for collecting the BLK_EXP for each channel
+        // 14. AXIS handshake for collecting the BLK_EXP for each channel
         S_GET_BLK_EXP,
         
-        // X. Output Handling pipeline
+        // 15. Process FFT output: compute magnitude squared, normalize (for FFT gain and block FP scaling)
         S_OUTPUT_READ,
         S_OUTPUT_MULTIPLY,
         S_OUTPUT_MULTIPLY_WAIT,//TEMP
         S_OUTPUT_ADD,
         S_OUTPUT_NORMALIZE,
         
-        // X. threshold detection
+        // 16. threshold detection
         S_THRESHOLD_FETCH_COEFFICIENT, // fetch corresponding coefficient from from ROM .mem
         S_THRESHOLD_ADD,    // add the sensitivity to the read value from ROM (state needed for pipelining and better performance)
         S_THRESHOLD_COMPARE, // do the actual comparison
         
-        // X. try SPI
+        // 17. try SPI
         S_FIFO_SPI_CHECK_VALID_WRITE,
         S_FIFO_SPI_WRITE_ENABLE,
         S_CHECK_SPI_READY,
         
-        // 11. Sending higher real byte in output FIFO buffer over UART
-        S_UART_FIFO_OUT_1_LATCH,                // Latch the higher real byte to the uart_tx input data_to_transmit_reg
-        S_UART_FIFO_OUT_1_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_OUT_1_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
+        // 18. Sending the normalized power spectrum over UART
+        S_UART_OUT_1_LATCH,                     // Latch the 1st MSbyte of normalized power spectrum to the uart_tx input data_to_transmit_reg
+        S_UART_OUT_1_PULSE_ENABLE,              // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_OUT_1_WAIT_BUSY_LOW,             // Wait till the uart_tx busy wire is LOW
         
-        // 12. Sending lower real byte in output FIFO buffer over UART
-        S_UART_FIFO_OUT_2_LATCH,                // Latch the lower real byte to the uart_tx input data_to_transmit_reg
-        S_UART_FIFO_OUT_2_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_OUT_2_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
+        S_UART_OUT_2_LATCH,                     // Latch the 2nd byte of normalized power spectrum to the uart_tx input data_to_transmit_reg
+        S_UART_OUT_2_PULSE_ENABLE,              // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_OUT_2_WAIT_BUSY_LOW,             // Wait till the uart_tx busy wire is LOW
         
-        S_UART_FIFO_OUT_3_LATCH,                // Latch the lower real byte to the uart_tx input data_to_transmit_reg
-        S_UART_FIFO_OUT_3_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_OUT_3_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
+        S_UART_OUT_3_LATCH,                     // Latch the 3rd byte of normalized power spectrum to the uart_tx input data_to_transmit_reg
+        S_UART_OUT_3_PULSE_ENABLE,              // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_OUT_3_WAIT_BUSY_LOW,             // Wait till the uart_tx busy wire is LOW
         
-        S_UART_FIFO_OUT_4_LATCH,                // Latch the lower real byte to the uart_tx input data_to_transmit_reg
-        S_UART_FIFO_OUT_4_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_OUT_4_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
+        S_UART_OUT_4_LATCH,                     // Latch the 4th byte of normalized power spectrum to the uart_tx input data_to_transmit_reg
+        S_UART_OUT_4_PULSE_ENABLE,              // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_OUT_4_WAIT_BUSY_LOW,             // Wait till the uart_tx busy wire is LOW
         
-        S_UART_FIFO_OUT_5_LATCH,                // Latch the lower real byte to the uart_tx input data_to_transmit_reg
-        S_UART_FIFO_OUT_5_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_OUT_5_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
+        S_UART_OUT_5_LATCH,                     // Latch the 5th byte of normalized power spectrum to the uart_tx input data_to_transmit_reg
+        S_UART_OUT_5_PULSE_ENABLE,              // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_OUT_5_WAIT_BUSY_LOW,             // Wait till the uart_tx busy wire is LOW
         
-        S_UART_FIFO_OUT_6_LATCH,                // Latch the lower real byte to the uart_tx input data_to_transmit_reg
-        S_UART_FIFO_OUT_6_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
-        S_UART_FIFO_OUT_6_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
+        S_UART_OUT_6_LATCH,                     // Latch the 6th LSbyte of normalized power spectrum to the uart_tx input data_to_transmit_reg
+        S_UART_OUT_6_PULSE_ENABLE,              // Pulse the uart_tx enable wire for 1 system clock cycle
+        S_UART_OUT_6_WAIT_BUSY_LOW,             // Wait till the uart_tx busy wire is LOW
         
-        S_DONE                                  // Reset all the counters used in the FSM
+        S_DONE                                  // Reset all the counters and flags used in the FSM
     } main_state_t;
     
     main_state_t current_state, next_state;
@@ -796,6 +799,16 @@ module dsp_top #(
             raw_x_imag_squared_reg2 <= 32'b0; raw_x_real_squared_reg2 <= 32'b0;
             raw_x_magnitude_squared_reg <= 33'b0;
             
+            raw_y_imag_reg <= 16'b0; raw_y_real_reg <= 16'b0;
+            raw_y_imag_squared_reg <= 32'b0; raw_y_real_squared_reg <= 32'b0;
+            raw_y_imag_squared_reg2 <= 32'b0; raw_y_real_squared_reg2 <= 32'b0;
+            raw_y_magnitude_squared_reg <= 33'b0;
+            
+            raw_z_imag_reg <= 16'b0; raw_z_real_reg <= 16'b0;
+            raw_z_imag_squared_reg <= 32'b0; raw_z_real_squared_reg <= 32'b0;
+            raw_z_imag_squared_reg2 <= 32'b0; raw_z_real_squared_reg2 <= 32'b0;
+            raw_z_magnitude_squared_reg <= 33'b0;
+            
         end else begin
             
             // default counter logic:
@@ -807,7 +820,7 @@ module dsp_top #(
             // During normal operation, update datapath based on FSM state
             case (current_state)
                 
-                S_I2C_ACCEL_XOUT_READ_OUTPUT: begin
+                S_I2C_BURST_ACCEL_READ_OUTPUT: begin
                     raw_accel_x_reg <= i2c_miso_data_burst_from_master[47:32];
                     raw_accel_y_reg <= i2c_miso_data_burst_from_master[31:16];
                     raw_accel_z_reg <= i2c_miso_data_burst_from_master[15:0];
@@ -815,7 +828,9 @@ module dsp_top #(
                 
                 
                 S_HAMMING_WINDOW_FETCH_COEFFICIENT: begin
+                    // Fetching the coefficient from the Hamming window ROM:
                     hamming_coeff_reg <= hamming_lut_rom[coeff_counter_reg];
+                    // NOTE: fifo_in_write_counter_reg is SAME for counting address of coeffs in ROM
                 end
                 
                 S_HAMMING_WINDOW_PREPARE_MULTIPLY: begin
@@ -847,9 +862,17 @@ module dsp_top #(
                 
                 S_OUTPUT_READ: begin
                     if (!fifo_out_empty) begin
-                        // Reading Channel-2 (X-axis) output:
+                        // Reading Channel-2 (x-axis) output:
                         raw_x_imag_reg <= fifo_out_read_data[95:80];
                         raw_x_real_reg <= fifo_out_read_data[79:64];
+                        
+                        // Reading Channel-1 (y-axis) output:
+                        raw_y_imag_reg <= fifo_out_read_data[63:48];
+                        raw_y_real_reg <= fifo_out_read_data[47:32];
+                        
+                        // Reading Channel-0 (z-axis) output:
+                        raw_z_imag_reg <= fifo_out_read_data[31:16];
+                        raw_z_real_reg <= fifo_out_read_data[15:0];
                     end
                 end
                 
@@ -858,17 +881,33 @@ module dsp_top #(
                     // The result is then assigned to an unsigned register, which is perfectly valid.
                     raw_x_real_squared_reg <= raw_x_real_reg * raw_x_real_reg;
                     raw_x_imag_squared_reg <= raw_x_imag_reg * raw_x_imag_reg;
+                    
+                    raw_y_real_squared_reg <= raw_y_real_reg * raw_y_real_reg;
+                    raw_y_imag_squared_reg <= raw_y_imag_reg * raw_y_imag_reg;
+                    
+                    raw_z_real_squared_reg <= raw_z_real_reg * raw_z_real_reg;
+                    raw_z_imag_squared_reg <= raw_z_imag_reg * raw_z_imag_reg;
                 end
                 
                 S_OUTPUT_MULTIPLY_WAIT: begin
                     raw_x_real_squared_reg2 <= raw_x_real_squared_reg;
                     raw_x_imag_squared_reg2 <= raw_x_imag_squared_reg;
+                    
+                    raw_y_real_squared_reg2 <= raw_y_real_squared_reg;
+                    raw_y_imag_squared_reg2 <= raw_y_imag_squared_reg;
+                    
+                    raw_z_real_squared_reg2 <= raw_z_real_squared_reg;
+                    raw_z_imag_squared_reg2 <= raw_z_imag_squared_reg;
                 end
                 
                 S_OUTPUT_ADD: begin
                     raw_x_magnitude_squared_reg <= raw_x_real_squared_reg2 + raw_x_imag_squared_reg2;
                     // even though we aren't multipying here, this still needs to be sync otherqise we get the impl warning for not being pipelined
                     // since raw_x_real_squared_reg and raw_x_imag_squared_reg are mult results
+                    
+                    raw_y_magnitude_squared_reg <= raw_y_real_squared_reg2 + raw_y_imag_squared_reg2;
+                    
+                    raw_z_magnitude_squared_reg <= raw_z_real_squared_reg2 + raw_z_imag_squared_reg2;
                 end
                 
             endcase
@@ -881,7 +920,7 @@ module dsp_top #(
     always_ff @(posedge CLK100MHZ or negedge rst_n) begin
         if (!rst_n)
             burst_read_timer_reg <= 17'b0;
-        else if (current_state == S_I2C_ACCEL_XOUT_READ_OUTPUT) // when a burst read is complete, we want to reset the timer
+        else if (current_state == S_I2C_BURST_ACCEL_READ_OUTPUT) // when a burst read is complete, we want to reset the timer
             burst_read_timer_reg <= 17'b0;
         else
             burst_read_timer_reg <= burst_read_timer_reg + 1;
@@ -906,13 +945,8 @@ module dsp_top #(
             i2c_register_address_burst_to_master_reg <= 8'h00;
             
             data_to_transmit_reg <= 8'h00;
-            
-            /*hamming_coeff_reg <= 16'b0;
-            raw_accel_x_reg <= 16'b0; raw_accel_y_reg <= 16'b0; raw_accel_z_reg <= 16'b0;
-            product_x_reg <= 32'b0; product_y_reg <= 32'b0; product_z_reg <= 32'b0;*/
-            
+                        
             fifo_in_write_en_reg <= 1'b0;
-            //fifo_in_write_data_reg <= 48'b0;
             fifo_in_write_counter_reg <= 11'b0;
             
             flit_transfer_counter_reg <= 11'b0;
@@ -921,7 +955,7 @@ module dsp_top #(
             
             blk_exp_x_reg <= 5'b0; blk_exp_y_reg <= 5'b0; blk_exp_z_reg <= 5'b0;
             
-            normal_x_magnitude_squared_reg <= 48'b0;
+            normal_x_magnitude_squared_reg <= 48'b0; normal_y_magnitude_squared_reg <= 48'b0; normal_z_magnitude_squared_reg <= 48'b0;
             
             thresholds_addr_reg <= 10'b0;
             thresholds_data_out_reg <= 48'b0;
@@ -1003,51 +1037,35 @@ module dsp_top #(
                 
                 // 3. Reading ACCEL_XOUT_H and ACCEL_XOUT_L (burst read)
                 
-                S_I2C_ACCEL_XOUT_CONFIG: begin
+                S_I2C_BURST_ACCEL_CONFIG: begin
                     i2c_read_write_burst_to_master_reg <= 1'b1;         // For reading (burst read 2 bytes)
                     i2c_mosi_data_burst_to_master_reg <= 48'b0;         // We want to read, not write. But we should still define this with a fixed value
                     i2c_register_address_burst_to_master_reg <= 8'h3B;  // Address of the ACCEL_XOUT_H register. Both this and ACCEL_XOUT_L are burst read
                 end
                 
-                S_I2C_ACCEL_XOUT_ENABLE: begin
+                S_I2C_BURST_ACCEL_ENABLE: begin
                     i2c_enable_burst_to_master_reg <= 1'b1;
                 end
                 
-                S_I2C_ACCEL_XOUT_BUSY_HIGH_ENABLE_LOW: begin
+                S_I2C_BURST_ACCEL_BUSY_HIGH_ENABLE_LOW: begin
                     if (!i2c_busy_burst_from_master)
                         i2c_enable_burst_to_master_reg <= 1'b1;     // Keep enable high if busy is low
                     else
                         i2c_enable_burst_to_master_reg <= 1'b0;     // Keep enable low if busy is high
                 end
                 
-                S_I2C_ACCEL_XOUT_READ_OUTPUT: begin
-                    // Actually read the i2c_master module's output:
-                    //raw_accel_x_reg <= i2c_miso_data_burst_from_master[47:32];
-                    //raw_accel_y_reg <= i2c_miso_data_burst_from_master[31:16];
-                    //raw_accel_z_reg <= i2c_miso_data_burst_from_master[15:0];
-                    //fifo_in_write_data_reg <= i2c_miso_data_burst_from_master;      // Writing to input FIFO buffer
+                S_I2C_BURST_ACCEL_READ_OUTPUT: begin
+                    // Actual reading of the i2c_master module's output happens in the synchronous-reset FSM
                     
                     // For UART:
+                    /* x-axis: i2c_miso_data_burst_from_master[47:32]
+                     * y-axis: i2c_miso_data_burst_from_master[31:16]
+                     * z-axis: i2c_miso_data_burst_from_master[15:0]
+                     */
                     data_to_transmit_reg <= i2c_miso_data_burst_from_master[47:40];
                     // We read the ACCEL_XOUT_H byte right now.
                     // The ACCEL_XOUT_L still remains on the i2c_miso_data_burst_from_master line, which we read later.
                 end
-                
-                
-                // X.
-                
-                /*S_HAMMING_WINDOW_FETCH_COEFFICIENT: begin
-                    // Fetching the coefficient from the Hamming window ROM:
-                    hamming_coeff_reg <= hamming_lut_rom[fifo_in_write_counter_reg];
-                    // fifo_in_write_counter_reg is SAME for counting address of coeffs in ROM
-                end
-                
-                S_HAMMING_WINDOW_MULTIPLY: begin
-                    // Performing the actual multiplication for windowing:
-                    product_x_reg <= $signed(raw_accel_x_reg) * $signed(hamming_coeff_reg);
-                    product_y_reg <= $signed(raw_accel_y_reg) * $signed(hamming_coeff_reg);
-                    product_z_reg <= $signed(raw_accel_z_reg) * $signed(hamming_coeff_reg);
-                end*/
                 
                 
                 // 4. Writing accelerometer readings to input FIFO buffer
@@ -1124,6 +1142,8 @@ module dsp_top #(
                 
                 S_OUTPUT_NORMALIZE: begin
                     normal_x_magnitude_squared_reg <= (raw_x_magnitude_squared_reg << (blk_exp_x_reg << 1)) >> 20;
+                    normal_y_magnitude_squared_reg <= (raw_y_magnitude_squared_reg << (blk_exp_y_reg << 1)) >> 20;
+                    normal_z_magnitude_squared_reg <= (raw_z_magnitude_squared_reg << (blk_exp_z_reg << 1)) >> 20;
                 end
                 
                 
@@ -1174,59 +1194,39 @@ module dsp_top #(
                 
                 // 11. Sending higher real byte in output FIFO buffer over UART
                 
-                S_UART_FIFO_OUT_1_LATCH: begin
-                    /*if (!fifo_out_empty) begin
-                        // Latch the higher real byte to uart_tx's data_to_transmit_reg for transmission
-                        //data_to_transmit_reg <= fifo_out_read_data[79:72];
-                        //data_to_transmit_reg <= true_x_real[15:8]; //TEMP
-                    end*/
-                    data_to_transmit_reg <= normal_x_magnitude_squared_reg[47:40]; //TEMP
+                S_UART_OUT_1_LATCH: begin
+                    // Latch the 1st output byte to uart_tx's data_to_transmit_reg for transmission
+                    data_to_transmit_reg <= normal_y_magnitude_squared_reg[47:40];
                 end
                 
                 
                 // 12. Sending lower real byte in output FIFO buffer over UART
                 
-                S_UART_FIFO_OUT_2_LATCH: begin
-                    /*if (!fifo_out_empty) begin
-                        // Latch the higher real byte to uart_tx's data_to_transmit_reg for transmission
-                        data_to_transmit_reg <= normal_x_magnitude_squared_reg[39:32]; //TEMP
-                    end*/
-                    data_to_transmit_reg <= normal_x_magnitude_squared_reg[39:32]; //TEMP
+                S_UART_OUT_2_LATCH: begin
+                    // Latch the 2nd output byte to uart_tx's data_to_transmit_reg for transmission
+                    data_to_transmit_reg <= normal_z_magnitude_squared_reg[39:32];
                 end
                 
-                S_UART_FIFO_OUT_3_LATCH: begin
-                    /*if (!fifo_out_empty) begin
-                        // Latch the higher real byte to uart_tx's data_to_transmit_reg for transmission
-                        data_to_transmit_reg <= normal_x_magnitude_squared_reg[31:24]; //TEMP
-                    end*/
-                    data_to_transmit_reg <= normal_x_magnitude_squared_reg[31:24]; //TEMP
+                S_UART_OUT_3_LATCH: begin
+                    // Latch the 3rd output byte to uart_tx's data_to_transmit_reg for transmission
+                    data_to_transmit_reg <= normal_z_magnitude_squared_reg[31:24];
                 end
                 
-                S_UART_FIFO_OUT_4_LATCH: begin
-                    /*if (!fifo_out_empty) begin
-                        // Latch the higher real byte to uart_tx's data_to_transmit_reg for transmission
-                        data_to_transmit_reg <= normal_x_magnitude_squared_reg[23:16]; //TEMP
-                    end*/
-                    data_to_transmit_reg <= normal_x_magnitude_squared_reg[23:16]; //TEMP
+                S_UART_OUT_4_LATCH: begin
+                    // Latch the 4th output byte to uart_tx's data_to_transmit_reg for transmission
+                    data_to_transmit_reg <= normal_z_magnitude_squared_reg[23:16];
                 end
                 
-                S_UART_FIFO_OUT_5_LATCH: begin
-                    /*if (!fifo_out_empty) begin
-                        // Latch the higher real byte to uart_tx's data_to_transmit_reg for transmission
-                        data_to_transmit_reg <= normal_x_magnitude_squared_reg[15:8]; //TEMP
-                    end*/
-                    data_to_transmit_reg <= normal_x_magnitude_squared_reg[15:8]; //TEMP
+                S_UART_OUT_5_LATCH: begin
+                    // Latch the 5th output byte to uart_tx's data_to_transmit_reg for transmission
+                    data_to_transmit_reg <= normal_z_magnitude_squared_reg[15:8];
                 end
                 
-                S_UART_FIFO_OUT_6_LATCH: begin
-                    data_to_transmit_reg <= normal_x_magnitude_squared_reg[7:0]; //TEMP
+                S_UART_OUT_6_LATCH: begin
+                    // Latch the 6th output byte to uart_tx's data_to_transmit_reg for transmission
+                    data_to_transmit_reg <= normal_z_magnitude_squared_reg[7:0];
                     
                     if (!fifo_out_empty) begin
-                        // Latch the lower real byte to uart_tx's data_to_transmit_reg for transmission
-                        //data_to_transmit_reg <= fifo_out_read_data[71:64];
-                        //data_to_transmit_reg <= true_x_real[7:0]; //TEMP
-                        
-                        
                         // Assert read enable to request the next word from the output FIFO buffer:
                         fifo_out_read_en_reg <= 1'b1;   // Pulse enable for NEXT word due to FWFT mode
                     end
@@ -1361,7 +1361,7 @@ module dsp_top #(
             S_WAIT_FOR_WAKEUP: begin
                 // NOTE: 100,000 clock cycles represent 1 ms
                 if (wakeup_timer_reg >= 1000000)    // 10 ms delay
-                    next_state = S_I2C_ACCEL_XOUT_CONFIG;
+                    next_state = S_I2C_BURST_ACCEL_CONFIG;
                 else
                     next_state = S_WAIT_FOR_WAKEUP;
             end
@@ -1369,44 +1369,44 @@ module dsp_top #(
             
             // 3. Reading ACCEL_XOUT_H and ACCEL_XOUT_L (burst read)
             
-            S_I2C_ACCEL_XOUT_CONFIG: begin
-                next_state = S_I2C_ACCEL_XOUT_WAIT_BEFORE_ENABLE;
+            S_I2C_BURST_ACCEL_CONFIG: begin
+                next_state = S_I2C_BURST_ACCEL_WAIT_BEFORE_ENABLE;
             end
             
-            S_I2C_ACCEL_XOUT_WAIT_BEFORE_ENABLE: begin
+            S_I2C_BURST_ACCEL_WAIT_BEFORE_ENABLE: begin
                 // Wait 1 clock cycle for the configuration values to stabilize
                 if (!i2c_busy_burst_from_master) begin
-                    next_state = S_I2C_ACCEL_XOUT_ENABLE;               // If I2C burst instance is idle, proceed to enable it
+                    next_state = S_I2C_BURST_ACCEL_ENABLE;               // If I2C burst instance is idle, proceed to enable it
                 end else begin
-                    next_state = S_I2C_ACCEL_XOUT_WAIT_BEFORE_ENABLE;   // Else, keep waiting
+                    next_state = S_I2C_BURST_ACCEL_WAIT_BEFORE_ENABLE;   // Else, keep waiting
                 end
             end
             
-            S_I2C_ACCEL_XOUT_ENABLE: begin
-                next_state = S_I2C_ACCEL_XOUT_BUSY_HIGH_ENABLE_LOW;
+            S_I2C_BURST_ACCEL_ENABLE: begin
+                next_state = S_I2C_BURST_ACCEL_BUSY_HIGH_ENABLE_LOW;
             end
             
-            S_I2C_ACCEL_XOUT_BUSY_HIGH_ENABLE_LOW: begin
+            S_I2C_BURST_ACCEL_BUSY_HIGH_ENABLE_LOW: begin
                 // Wait till busy signal is HIGH to set enable signal LOW
                 if (!i2c_enable_burst_to_master_reg && i2c_busy_burst_from_master)
-                    next_state = S_I2C_ACCEL_XOUT_WAIT_BUSY_LOW;
+                    next_state = S_I2C_BURST_ACCEL_WAIT_BUSY_LOW;
                 else
-                    next_state = S_I2C_ACCEL_XOUT_BUSY_HIGH_ENABLE_LOW;
+                    next_state = S_I2C_BURST_ACCEL_BUSY_HIGH_ENABLE_LOW;
             end
             
-            S_I2C_ACCEL_XOUT_WAIT_BUSY_LOW: begin
+            S_I2C_BURST_ACCEL_WAIT_BUSY_LOW: begin
                 // Wait till busy is LOW, which means I2C transaction is complete
                 if (!i2c_busy_burst_from_master)
-                    next_state = S_I2C_ACCEL_XOUT_READ_OUTPUT;
+                    next_state = S_I2C_BURST_ACCEL_READ_OUTPUT;
                 else
-                    next_state = S_I2C_ACCEL_XOUT_WAIT_BUSY_LOW;
+                    next_state = S_I2C_BURST_ACCEL_WAIT_BUSY_LOW;
             end
             
-            S_I2C_ACCEL_XOUT_READ_OUTPUT: begin
+            S_I2C_BURST_ACCEL_READ_OUTPUT: begin
                 if (!i2c_error_burst_from_master) // error port is registered (holds memory). so even after busy is deasserted, I can check the error port
                     next_state = S_HAMMING_WINDOW_FETCH_COEFFICIENT;
                 else
-                    next_state = S_I2C_ACCEL_XOUT_CONFIG;       //repeat if error
+                    next_state = S_I2C_BURST_ACCEL_CONFIG;       //repeat if error
             end
             
             
@@ -1554,7 +1554,7 @@ module dsp_top #(
             
             S_WAIT_BEFORE_NEXT_BURST_READ: begin
                 if (burst_read_timer_reg >= 100000) // 100000 means 1 ms
-                    next_state = S_I2C_ACCEL_XOUT_CONFIG;               // Loop back to burst reading accelerometer values
+                    next_state = S_I2C_BURST_ACCEL_CONFIG;               // Loop back to burst reading accelerometer values
                 else
                     next_state = S_WAIT_BEFORE_NEXT_BURST_READ;
             end
@@ -1671,150 +1671,150 @@ module dsp_top #(
             end
             
             S_CHECK_SPI_READY: begin
-                next_state = S_UART_FIFO_OUT_1_LATCH;
+                next_state = S_UART_OUT_1_LATCH;
             end
             
             
             // 11. Sending higher real byte in output FIFO buffer over UART
             
-            S_UART_FIFO_OUT_1_LATCH: begin
+            S_UART_OUT_1_LATCH: begin
                 // Just wait 1 clock cycle to latch the higher byte to uart_tx's data_to_transmit_reg
-                next_state = S_UART_FIFO_OUT_1_PULSE_ENABLE;
+                next_state = S_UART_OUT_1_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_1_PULSE_ENABLE: begin
+            S_UART_OUT_1_PULSE_ENABLE: begin
                 uart_tx_en_pulse_sig = !uart_busy_sig && rst_n;         // HIGH only when the UART TX module is NOT busy and NOT in reset
                 // uart_tx_en_pulse_sig is HIGH for 1 cycle, since the FSM states last 1 clock cycle each
                 
                 if (uart_tx_en_pulse_sig)
-                    next_state = S_UART_FIFO_OUT_1_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
+                    next_state = S_UART_OUT_1_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
                 else
-                    next_state = S_UART_FIFO_OUT_1_PULSE_ENABLE;
+                    next_state = S_UART_OUT_1_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_1_WAIT_BUSY_LOW: begin
+            S_UART_OUT_1_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig)
-                    next_state = S_UART_FIFO_OUT_2_LATCH;
+                    next_state = S_UART_OUT_2_LATCH;
                 else
-                    next_state = S_UART_FIFO_OUT_1_WAIT_BUSY_LOW;
+                    next_state = S_UART_OUT_1_WAIT_BUSY_LOW;
             end
             
             
             // 12. Sending lower real byte in output FIFO buffer over UART
             
-            S_UART_FIFO_OUT_2_LATCH: begin
+            S_UART_OUT_2_LATCH: begin
                 // Just wait 1 clock cycle to latch the higher byte to uart_tx's data_to_transmit_reg
-                next_state = S_UART_FIFO_OUT_2_PULSE_ENABLE;
+                next_state = S_UART_OUT_2_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_2_PULSE_ENABLE: begin
+            S_UART_OUT_2_PULSE_ENABLE: begin
                 uart_tx_en_pulse_sig = !uart_busy_sig && rst_n;         // HIGH only when the UART TX module is NOT busy and NOT in reset
                 // uart_tx_en_pulse_sig is HIGH for 1 cycle, since the FSM states last 1 clock cycle each
                 
                 if (uart_tx_en_pulse_sig)
-                    next_state = S_UART_FIFO_OUT_2_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
+                    next_state = S_UART_OUT_2_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
                 else
-                    next_state = S_UART_FIFO_OUT_2_PULSE_ENABLE;
+                    next_state = S_UART_OUT_2_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_2_WAIT_BUSY_LOW: begin
+            S_UART_OUT_2_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig)
-                    next_state = S_UART_FIFO_OUT_3_LATCH;
+                    next_state = S_UART_OUT_3_LATCH;
                 else
-                    next_state = S_UART_FIFO_OUT_2_WAIT_BUSY_LOW;
+                    next_state = S_UART_OUT_2_WAIT_BUSY_LOW;
             end
             
             
-            S_UART_FIFO_OUT_3_LATCH: begin
+            S_UART_OUT_3_LATCH: begin
                 // Just wait 1 clock cycle to latch the higher byte to uart_tx's data_to_transmit_reg
-                next_state = S_UART_FIFO_OUT_3_PULSE_ENABLE;
+                next_state = S_UART_OUT_3_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_3_PULSE_ENABLE: begin
+            S_UART_OUT_3_PULSE_ENABLE: begin
                 uart_tx_en_pulse_sig = !uart_busy_sig && rst_n;         // HIGH only when the UART TX module is NOT busy and NOT in reset
                 // uart_tx_en_pulse_sig is HIGH for 1 cycle, since the FSM states last 1 clock cycle each
                 
                 if (uart_tx_en_pulse_sig)
-                    next_state = S_UART_FIFO_OUT_3_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
+                    next_state = S_UART_OUT_3_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
                 else
-                    next_state = S_UART_FIFO_OUT_3_PULSE_ENABLE;
+                    next_state = S_UART_OUT_3_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_3_WAIT_BUSY_LOW: begin
+            S_UART_OUT_3_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig)
-                    next_state = S_UART_FIFO_OUT_4_LATCH;
+                    next_state = S_UART_OUT_4_LATCH;
                 else
-                    next_state = S_UART_FIFO_OUT_3_WAIT_BUSY_LOW;
+                    next_state = S_UART_OUT_3_WAIT_BUSY_LOW;
             end
             
             
-            S_UART_FIFO_OUT_4_LATCH: begin
+            S_UART_OUT_4_LATCH: begin
                 // Just wait 1 clock cycle to latch the higher byte to uart_tx's data_to_transmit_reg
-                next_state = S_UART_FIFO_OUT_4_PULSE_ENABLE;
+                next_state = S_UART_OUT_4_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_4_PULSE_ENABLE: begin
+            S_UART_OUT_4_PULSE_ENABLE: begin
                 uart_tx_en_pulse_sig = !uart_busy_sig && rst_n;         // HIGH only when the UART TX module is NOT busy and NOT in reset
                 // uart_tx_en_pulse_sig is HIGH for 1 cycle, since the FSM states last 1 clock cycle each
                 
                 if (uart_tx_en_pulse_sig)
-                    next_state = S_UART_FIFO_OUT_4_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
+                    next_state = S_UART_OUT_4_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
                 else
-                    next_state = S_UART_FIFO_OUT_4_PULSE_ENABLE;
+                    next_state = S_UART_OUT_4_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_4_WAIT_BUSY_LOW: begin
+            S_UART_OUT_4_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig)
-                    next_state = S_UART_FIFO_OUT_5_LATCH;
+                    next_state = S_UART_OUT_5_LATCH;
                 else
-                    next_state = S_UART_FIFO_OUT_4_WAIT_BUSY_LOW;
+                    next_state = S_UART_OUT_4_WAIT_BUSY_LOW;
             end
             
             
-            S_UART_FIFO_OUT_5_LATCH: begin
+            S_UART_OUT_5_LATCH: begin
                 // Just wait 1 clock cycle to latch the higher byte to uart_tx's data_to_transmit_reg
-                next_state = S_UART_FIFO_OUT_5_PULSE_ENABLE;
+                next_state = S_UART_OUT_5_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_5_PULSE_ENABLE: begin
+            S_UART_OUT_5_PULSE_ENABLE: begin
                 uart_tx_en_pulse_sig = !uart_busy_sig && rst_n;         // HIGH only when the UART TX module is NOT busy and NOT in reset
                 // uart_tx_en_pulse_sig is HIGH for 1 cycle, since the FSM states last 1 clock cycle each
                 
                 if (uart_tx_en_pulse_sig)
-                    next_state = S_UART_FIFO_OUT_5_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
+                    next_state = S_UART_OUT_5_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
                 else
-                    next_state = S_UART_FIFO_OUT_5_PULSE_ENABLE;
+                    next_state = S_UART_OUT_5_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_5_WAIT_BUSY_LOW: begin
+            S_UART_OUT_5_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig)
-                    next_state = S_UART_FIFO_OUT_6_LATCH;
+                    next_state = S_UART_OUT_6_LATCH;
                 else
-                    next_state = S_UART_FIFO_OUT_5_WAIT_BUSY_LOW;
+                    next_state = S_UART_OUT_5_WAIT_BUSY_LOW;
             end
             
             
-            S_UART_FIFO_OUT_6_LATCH: begin
+            S_UART_OUT_6_LATCH: begin
                 // Just wait 1 clock cycle to latch the lower byte to uart_tx's data_to_transmit_reg
-                next_state = S_UART_FIFO_OUT_6_PULSE_ENABLE;
+                next_state = S_UART_OUT_6_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_6_PULSE_ENABLE: begin
+            S_UART_OUT_6_PULSE_ENABLE: begin
                 uart_tx_en_pulse_sig = !uart_busy_sig && rst_n;         // HIGH only when the UART TX module is NOT busy and NOT in reset
                 // uart_tx_en_pulse_sig is HIGH for 1 cycle, since the FSM states last 1 clock cycle each
                 
                 if (uart_tx_en_pulse_sig)
-                    next_state = S_UART_FIFO_OUT_6_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
+                    next_state = S_UART_OUT_6_WAIT_BUSY_LOW;       // Only transition to the next state once enable signal is HIGH
                 else
-                    next_state = S_UART_FIFO_OUT_6_PULSE_ENABLE;
+                    next_state = S_UART_OUT_6_PULSE_ENABLE;
             end
             
-            S_UART_FIFO_OUT_6_WAIT_BUSY_LOW: begin
+            S_UART_OUT_6_WAIT_BUSY_LOW: begin
                 // Transition when UART TX module is not busy, else wait here till communication is finished
                 if (!uart_busy_sig) begin
                     if (fifo_out_empty)
@@ -1822,14 +1822,14 @@ module dsp_top #(
                     else
                         next_state = S_OUTPUT_READ;
                 end else
-                    next_state = S_UART_FIFO_OUT_6_WAIT_BUSY_LOW;
+                    next_state = S_UART_OUT_6_WAIT_BUSY_LOW;
             end
             
             
             S_DONE: begin
                 reset_coeff_counter = 1'b1; // for decoupling sync coeff_counter_reg from async current_state register
                 
-                next_state = S_I2C_ACCEL_XOUT_CONFIG;       // Loop back to burst reading accelerometer values
+                next_state = S_I2C_BURST_ACCEL_CONFIG;       // Loop back to burst reading accelerometer values
             end
             
         endcase
