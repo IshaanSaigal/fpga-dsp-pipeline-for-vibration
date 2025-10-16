@@ -3,7 +3,7 @@
 // Company: 
 // Engineer: 
 // 
-// Create Date: 10.06.2025 17:47:01
+// Create Date: 13.10.2025 19:21:53
 // Design Name: 
 // Module Name: fft_top
 // Project Name: 
@@ -22,7 +22,7 @@
 
 module fft_top (
     input wire CLK100MHZ,       // 100MHz clock pin, Pin W5
-    input wire RESET_N,         // Active-low reset switch, Pin R2
+    input wire RESET_N,         // Active-low reset switch, Pin U1
     
     inout wire MPU_SCL,         // PMOD JA, Pin J1
     inout wire MPU_SDA,         // PMOD JA, Pin L2
@@ -82,50 +82,16 @@ module fft_top (
     // complex pipelined look-ahead logic.
     
     // --- Internal Signals for Input FIFO Buffer ---
-    logic           fifo_sync_reset;                    // (wire) Unnecessary; just used for better readability
-    logic           reset_sync_reg1, reset_sync_reg2;   // 1-bit registers are equivalent to FFs
-    // The "srst" port of the FIFO Generator IP is an active-high synchronous reset. "Synchronous" means that the reset only happens on the
-    // rising edge of the clk. We cannot directly connect to RESET_N switch since that is asynchronous, and could cause metastability in the FIFO core.
-    // Thus, we update this in a separate always_ff block, synchronised with the clk. For this, we will use a two-flop synchronizer chain:
-    always_ff @(posedge CLK100MHZ) begin
-        // First FF samples the asynchronous switch input. This FF is allowed to go metastable.
-        reset_sync_reg1 <= !rst_n;              // This FF samples asynchronous rst_n on the clk edge; !rst_n since active-high
-        // Setup time is the minimum time BEFORE the clk edge that the input must be stable.
-        // Hold time is the minimum time AFTER the clk edge that the input must be stable.
-        // If the rst_n signal changes in this setup/hold window, the reset_sync_reg1 would become metastable.
-        
-        // Second FF samples the synchronous first FF. It has a full clock cycle for the first FF to settle.
-        reset_sync_reg2 <= reset_sync_reg1;     // The output of this will be stable.
-        
-        // Best-case scenario for de/asserting RESET_N (2 clk cycles):
-        // posedge 0: Both registers are stable.
-        // posedge 1: RESET_N changes outside the setup/hold window, not causing any metastability in FF1.
-        //            FF1 samples the new !rst_n correctly. FF2 samples the old value of FF1 (from before posedge 1).
-        // posedge 2: FF2 samples the stable output of FF1.
-        
-        // Worst-case scenario for de/asserting RESET_N (3 clk cycles):
-        // posedge 0: Both registers are stable.
-        // posedge 1: RESET_N changes in the setup/hold window, which may or may not cause metastability in FF1.
-        //            FF2 samples FF1's output, which may be valid, invalid, or metastable depending on FF1's state.
-        // Between posedge 1 and 2: Metastability decays exponentially in FF1, it resolves to a stable 0 or 1.
-        //                          This MAY NOT match !rst_n. Let's say it doesn't.
-        // posedge 2: FF2 samples the stable output of FF1, without any metastability. However, if FF1 resolved to
-        //            the incorrect value, FF2 would sample that incorrect value.
-        //            FF1 samples !rst_n again. Since RESET_N doesn't change, FF1 latches the correct value.
-        // posedge 3: FF2 samples the stable output of FF1, which is now the correctly value.
-    end
-    assign fifo_sync_reset = reset_sync_reg2;   // Wire holds synchronous value for !rst_n (because active-high)
-    
     logic           fifo_in_write_en_reg;       // 1-cycle enable pulse for writing into the buffer; register for sequential I2C logic
     logic [15:0]    fifo_in_write_data_reg;     // Register bus for sequential I2C logic. Only 16-bit real input values are stored to save resources; imag=0
     
     logic           fifo_in_read_en;            // 1-cycle enable pulse for reading from the buffer; wire for combinational AXIS logic
     logic [15:0]    fifo_in_read_data;
     
-    logic           fifo_in_full;               // Output wire indicating FIFO is full (1026 samples); should never be HIGH as we only store 1024 samples
+    logic           fifo_in_full;               // Output wire indicating FIFO is full (1025 samples); should never be HIGH as we only store 1024 samples
     logic           fifo_in_empty;              // Output wire indicating FIFO is empty
     
-    // Counter for inputting exactly 1024 samples to the FIFO buffer (1026 is the actual depth):
+    // Counter for inputting exactly 1024 samples to the FIFO buffer (1025 is the actual depth):
     logic [10:0]    fifo_in_write_counter_reg;  // Incremented every time a sample is written. 11-bit, since we need to represent values till 1024
                                                 // (10-bit is 0-1023)
     
@@ -142,9 +108,16 @@ module fft_top (
     
     // Signals for AXI4-Stream Slave logic (for outputting data from the AXI4-Stream Master in FFT core):
     logic [31:0]    s_axis_data_tdata;
+    logic [7:0]     s_axis_data_tuser;          // Unused. The m_axis_status channel is used for BLK_EXP instead.
     logic           s_axis_data_tvalid;
     logic           s_axis_data_tready;
     logic           s_axis_data_tlast;
+    
+    logic [7:0]     s_axis_status_tdata;
+    logic           s_axis_status_tvalid;
+    logic           s_axis_status_tready;
+    logic [4:0]     blk_exp_x_reg;              // For block FP scaling
+    
     
     // Counter for inputting exactly 1024 samples to the FFT core:
     logic [10:0]    flit_transfer_counter_reg;  // 11-bit, since we need to represent values till 1024
@@ -159,7 +132,7 @@ module fft_top (
     logic           fifo_out_read_en_reg;       // 1-cycle enable pulse for reading from the buffer; register for sequential SPI logic
     logic [31:0]    fifo_out_read_data;
     
-    logic           fifo_out_full;              // Output wire indicating FIFO is full (1026 samples); should never be HIGH as we only store 1024 samples
+    logic           fifo_out_full;              // Output wire indicating FIFO is full (1025 samples); should never be HIGH as we only store 1024 samples
     logic           fifo_out_empty;             // Output wire indicating FIFO is empty
     
     // NOTE: Unlike the Input FIFO Buffer core, we won't need a counter for inputting exactly 1024 samples here,
@@ -167,6 +140,16 @@ module fft_top (
     
     // NOTE: This buffer's input logic is combinational for fast AXI4-Stream, but output logic is sequential for slow SPI.
     // Combinational logic is needed in AXI4-Stream for writing in a single clock cycle.
+    
+    
+    // --- Internal Signals for Output Handling: Block FP Scaling, Finding Magnitude Squared, Normalizing ---
+    // NOTE: The following registers need to be explicitly declared as signed since they will be storing signed integer values.
+    // The synthesizer infers the required hardware logic to account for signed arithmetic operations with these registers.
+    // By default, a register signal holds unsigned values and doesn't contain any logic to preserve its sign bit.
+    logic signed [15:0] raw_x_imag_reg;
+    logic signed [15:0] raw_x_real_reg;
+    logic signed [15:0] true_x_imag_reg;
+    logic signed [15:0] true_x_real_reg;
     
     
     // --- Instantiating I2C Master module ---
@@ -227,9 +210,9 @@ module fft_top (
     
     
     // --- Instantiating the FIFO IP for Input Buffer ---
-    fifo_buffer in_fifo_buffer_inst (
+    in_fifo_buffer in_fifo_buffer_inst (
         .clk(CLK100MHZ),                    // (input wire) System clock
-        .srst(fifo_sync_reset),             // (input wire) Synchronous reset
+        .rst(!rst_n),                       // input wire) Asynchronous active-high reset; negate rst_n to handle active-high
         
         .din(fifo_in_write_data_reg),       // (input wire [15:0])
         .wr_en(fifo_in_write_en_reg),       // (input wire)
@@ -250,7 +233,7 @@ module fft_top (
                                                                     // NOTE: MUST be asserted for at least 2 clk cycles; handled by RESET_N debouncing logic
         
         // Signals for sending metadata. Ports left unconnected; still need to write connections to avoid Critical Warnings:
-        .s_axis_config_tdata(16'b0),                                // (input wire [15:0])
+        .s_axis_config_tdata(7'b0),                                 // (input wire [7:0])
         .s_axis_config_tvalid(1'b0),                                // (input wire) Tied to '0' / no transfer occurs
         .s_axis_config_tready(s_axis_config_tready),                // (output wire)
         
@@ -262,9 +245,14 @@ module fft_top (
         
         // AXI4-Stream Master ports (for output):
         .m_axis_data_tdata(s_axis_data_tdata),                      // (output wire [31:0])
+        .m_axis_data_tuser(s_axis_data_tuser),                      // output wire [7:0] Unused
         .m_axis_data_tvalid(s_axis_data_tvalid),                    // (output wire)
         .m_axis_data_tready(s_axis_data_tready),                    // (input wire)
         .m_axis_data_tlast(s_axis_data_tlast),                      // (output wire)
+        
+        .m_axis_status_tdata(s_axis_status_tdata),                  // output wire [7:0]
+        .m_axis_status_tvalid(s_axis_status_tvalid),                // output wire
+        .m_axis_status_tready(s_axis_status_tready),                // input wire
         
         // Signals for debugging. Ports left unconnected; still need to write connections to avoid Critical Warnings:
         .event_frame_started(event_frame_started),                  // (output wire)
@@ -277,9 +265,9 @@ module fft_top (
     
     
     // --- Instantiating the FIFO IP for Output Buffer ---
-    fifo_generator_0 out_fifo_buffer_inst (
+    out_fifo_buffer out_fifo_buffer_inst (
         .clk(CLK100MHZ),                    // (input wire) System clock
-        .srst(fifo_sync_reset),             // (input wire) Synchronous reset (using the same signal as the input FIFO buffer)
+        .rst(!rst_n),                       // (input wire) Asynchronous active-high reset; negate rst_n to handle active-high
         
         .din(s_axis_data_tdata),            // (input wire [31:0])
         .wr_en(fifo_out_write_en),          // (input wire)
@@ -348,12 +336,17 @@ module fft_top (
         // 10. Streaming the 1024-sample output frame from the FFT core to the output FIFO buffer
         S_FFT_OUTPUT_FRAME,                     // High-speed combinational logic for AXIS flit transfer on every clock cycle
         
-        // 11. Sending higher real byte in output FIFO buffer over UART
+        // 11. Block floating-point scaling and normalization
+        S_GET_BLK_EXP,                          // AXIS handshake for collecting the BLK_EXP
+        S_OUTPUT_READ,                          // Read the FFT output
+        S_OUTPUT_SCALE,                         // Perform block floating-point scaling
+        
+        // 12. Sending higher real byte in output FIFO buffer over UART
         S_UART_FIFO_OUT_H_LATCH,                // Latch the higher real byte to the uart_tx input data_to_transmit_reg
         S_UART_FIFO_OUT_H_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
         S_UART_FIFO_OUT_H_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
         
-        // 12. Sending lower real byte in output FIFO buffer over UART
+        // 13. Sending lower real byte in output FIFO buffer over UART
         S_UART_FIFO_OUT_L_LATCH,                // Latch the lower real byte to the uart_tx input data_to_transmit_reg
         S_UART_FIFO_OUT_L_PULSE_ENABLE,         // Pulse the uart_tx enable wire for 1 system clock cycle
         S_UART_FIFO_OUT_L_WAIT_BUSY_LOW,        // Wait till the uart_tx busy wire is LOW
@@ -396,9 +389,15 @@ module fft_top (
             fifo_in_write_data_reg <= 16'b0;
             fifo_in_write_counter_reg <= 11'b0;
             
+            blk_exp_x_reg <= 5'b0;
             flit_transfer_counter_reg <= 11'b0;
             
             fifo_out_read_en_reg <= 1'b0;
+            
+            raw_x_imag_reg <= 16'b0;
+            raw_x_real_reg <= 16'b0;
+            true_x_imag_reg <= 16'b0;
+            true_x_real_reg <= 16'b0;
             
         end else begin
             // Defaults:
@@ -537,22 +536,54 @@ module fft_top (
                 end
                 
                 
-                // 11. Sending higher real byte in output FIFO buffer over UART
+                // 11. Block floating-point scaling and normalization
+                
+                S_GET_BLK_EXP: begin
+                    if (s_axis_status_tvalid && s_axis_status_tready) begin // AXIS handshake
+                        blk_exp_x_reg <= s_axis_status_tdata[4:0];
+                    end
+                end
+                
+                S_OUTPUT_READ: begin
+                    if (!fifo_out_empty) begin
+                        raw_x_imag_reg <= fifo_out_read_data[31:16];
+                        raw_x_real_reg <= fifo_out_read_data[15:0];
+                    end
+                end
+                
+                S_OUTPUT_SCALE: begin
+                    true_x_imag_reg <= (48'(raw_x_imag_reg) << blk_exp_x_reg) >>> 10;
+                    true_x_real_reg <= (48'(raw_x_real_reg) << blk_exp_x_reg) >>> 10;
+                    
+                    // Implements the formula:
+                    //      Normalized True Output = (Raw Output * 2^BLK_EXP) / 2^10
+                    //   => Normalized True Output = (Raw Output << BLK_EXP) >> 10
+                    // Hardware considerations for shifting:
+                    // 1. Cast raw_..._reg to 48 bits: The 16-bit signed raw value is
+                    //    cast to a wider temporary signed net to prevent overflow during the
+                    //    left shift. BLK_EXP can be have a max value of 5'b11111 (5'd31).
+                    //    A 16+32 = 48-bit wide net ensures no overflows can occur.
+                    // 2. >>>: Arithmetic right shift is done to preserve the sign bit
+                    //    of the signed result while right shifting.
+                end
+                
+                
+                // 12. Sending higher real byte in output FIFO buffer over UART
                 
                 S_UART_FIFO_OUT_H_LATCH: begin
                     if (!fifo_out_empty) begin
                         // Latch the higher real byte to uart_tx's data_to_transmit_reg for transmission
-                        data_to_transmit_reg <= fifo_out_read_data[15:8];
+                        data_to_transmit_reg <= true_x_real_reg[15:8];
                     end
                 end
                 
                 
-                // 12. Sending lower real byte in output FIFO buffer over UART
+                // 13. Sending lower real byte in output FIFO buffer over UART
                 
                 S_UART_FIFO_OUT_L_LATCH: begin
                     if (!fifo_out_empty) begin
                         // Latch the lower real byte to uart_tx's data_to_transmit_reg for transmission
-                        data_to_transmit_reg <= fifo_out_read_data[7:0];
+                        data_to_transmit_reg <= true_x_real_reg[7:0];
                         
                         // Assert read enable to request the next word from the output FIFO buffer:
                         fifo_out_read_en_reg <= 1'b1;   // Pulse enable for NEXT word due to FWFT mode
@@ -587,6 +618,7 @@ module fft_top (
         
         // AXIS Slave signals:
         s_axis_data_tready = 1'b0;
+        s_axis_status_tready = 1'b0;
         fifo_out_write_en = 1'b0;
         
         case (current_state)
@@ -868,13 +900,33 @@ module fft_top (
                 
                 // Logic for next state:
                 if (s_axis_data_tlast && s_axis_data_tvalid && s_axis_data_tready)  // Transition ONLY after AXIS handshake for the LAST sample
-                    next_state = S_UART_FIFO_OUT_H_LATCH;
+                    next_state = S_GET_BLK_EXP;
                 else
                     next_state = S_FFT_OUTPUT_FRAME;
             end
             
             
-            // 11. Sending higher real byte in output FIFO buffer over UART
+            // 11. Block floating-point scaling and normalization
+            
+            S_GET_BLK_EXP: begin
+                s_axis_status_tready = 1'b1;
+                
+                if (s_axis_status_tvalid && s_axis_status_tready) begin // AXIS handshake
+                    next_state = S_OUTPUT_READ;
+                end else
+                    next_state = S_GET_BLK_EXP;
+            end
+            
+            S_OUTPUT_READ: begin
+                next_state = S_OUTPUT_SCALE;
+            end
+            
+            S_OUTPUT_SCALE: begin
+                next_state = S_UART_FIFO_OUT_H_LATCH;
+            end
+            
+            
+            // 12. Sending higher real byte in output FIFO buffer over UART
             
             S_UART_FIFO_OUT_H_LATCH: begin
                 // Just wait 1 clock cycle to latch the higher byte to uart_tx's data_to_transmit_reg
@@ -900,7 +952,7 @@ module fft_top (
             end
             
             
-            // 12. Sending lower real byte in output FIFO buffer over UART
+            // 13. Sending lower real byte in output FIFO buffer over UART
             
             S_UART_FIFO_OUT_L_LATCH: begin
                 // Just wait 1 clock cycle to latch the lower byte to uart_tx's data_to_transmit_reg
@@ -923,7 +975,7 @@ module fft_top (
                     if (fifo_out_empty)
                         next_state = S_DONE;
                     else
-                        next_state = S_UART_FIFO_OUT_H_LATCH;
+                        next_state = S_OUTPUT_READ;
                 end else
                     next_state = S_UART_FIFO_OUT_L_WAIT_BUSY_LOW;
             end
